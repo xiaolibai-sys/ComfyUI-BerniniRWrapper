@@ -1,34 +1,35 @@
-"""
-ComfyUI-BerniniR: Custom node package for the Bernini-R 1.3B video model.
+"""ComfyUI-BerniniR: Custom node package for the Bernini-R 1.3B/14B video model.
 
 Features:
   - Model loading with separate LoRA-aware torch.compile node
-  - Temporal context window tiling for long video generation (4 schedules)
+  - Temporal context window tiling for long video generation
   - Enhanced KSampler with native context window support
-  - Six-mode guidance family: CFG, APG, RAAG, S2, STG_A, STG_R
-  - Prompt planner with 12 task presets, system prompts, and CLIP caching
+  - Seven-mode guidance family: CFG, APG, RAAG, S2, Z2, STG_A, STG_R
+  - Prompt embedding with task presets, system prompts, and CLIP caching
   - In-context conditioning for video editing
   - Five attention backends: SageAttention 3, SageAttention, FlashAttention, xFormers, SDPA
   - TeaCache acceleration and GPU<->CPU block swap
 
-Registered nodes (17):
+Registered nodes (19):
   BerniniR_ModelLoader        — Load diffusion model
   BerniniR_CompileModel       — Apply torch.compile after LoRA loading
   BerniniR_CLIPLoader         — Load Wan text encoder
   BerniniR_VAELoader          — Load Bernini-R VAE
-  BerniniR_ContextWindow      — Configure temporal context windows
-  BerniniR_KSampler           — Enhanced sampler with context window support
-  BerniniR_KSamplerTeaCache   — Sampler with TeaCache block skipping
-  BerniniR_DualExpertSampler  — High/low-noise model switching per step
   BerniniR_Conditioning       — Create latents + attach in-context references
-  BerniniR_PromptPlanner      — Task-aware prompt planning & CLIP encoding
-  BerniniR_ApplyNAG           — Normalized Attention Guidance for detail enhancement
-  BerniniR_GuidanceStrengthSchedule — Per-step guidance scale curve
-  BerniniR_AttentionConfig    — Select attention backend
+  BerniniR_KSampler           — Enhanced sampler with context window support
+  BerniniR_TeaCacheArgs       — TeaCache block-skipping args
+  BerniniR_ContextWindow      — Configure temporal context windows
+  BerniniR_PromptEmbedding    — Task-aware prompt embedding & CLIP encoding
   BerniniR_VAEDecode          — VAE decode with color matching
   BerniniR_VAEEncode          — VAE encode with tiling
-  BerniniR_LoadLoRA           — Append LoRA spec (inline merge)
+  BerniniR_ApplyNAG           — Normalized Attention Guidance for detail enhancement
+  BerniniR_GuidanceStrengthSchedule — Per-step guidance scale curve
+  BerniniR_DualExpertSampler  — High/low-noise model switching per step
   BerniniR_BlockSwapArgs      — Configure GPU<->CPU block swapping
+  BerniniR_GuidanceConfig     — Select guidance mode & parameters
+  BerniniR_SegmentSchedule    — Per-segment schedule
+  BerniniR_LoadLoRA           — Append LoRA spec (inline merge)
+  BerniniR_AttentionConfig    — Select attention backend
 """
 
 import logging
