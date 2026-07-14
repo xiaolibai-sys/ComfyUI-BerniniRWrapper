@@ -122,7 +122,7 @@ Activate the ComfyUI virtual environment, then run:
 pip install numpy>=1.21.0 einops tqdm
 
 # Optional: attention backends (pick what works on your GPU)
-pip install sageattention       # or sageattn3 for SageAttention 3
+pip install sageattention      
 pip install flash-attn          # FlashAttention
 pip install xformers            # xFormers backend
 pip install kornia              # CIELAB path for Reinhard color matching
@@ -195,7 +195,7 @@ All 19 nodes appear under the **Bernini-R** category in ComfyUI.
 |---|---|---|
 | `BerniniR KSampler` | `LATENT` | Enhanced sampler with native context-window, flow-shift, NAG, the seven-mode guidance family, and dynamic guidance support. |
 | `BerniniR TeaCache Args` | `BERNINI_TEACACHE` | Configure TeaCache block skipping; connect its output to the `teacache_args` input of `BerniniR KSampler` to enable acceleration. Disconnect to disable. |
-| `BerniniR Dual Expert Sampler` | `LATENT` | Switch between high-noise and low-noise model instances per step. |
+| `BerniniR Dual Expert Sampler` | `LATENT` | Switch between high-noise and low-noise model instances automatically. |
 | `BerniniR Context Window` | `BERNINI_CTX` | Configure temporal context window schedule, overlap, and fusion method. |
 | `BerniniR Guidance Strength Schedule` | `BERNINI_GUIDANCE` | Generate a per-step guidance scale curve. |
 | `BerniniR Attention Config` | `BERNINI_ATTN` | Select the attention backend. |
