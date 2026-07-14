@@ -78,6 +78,7 @@ class BerniniR_DualExpertSampler:
                 "flow_shift": ("FLOAT", {"default": 3.0, "min": 0.1, "max": 100.0, "step": 0.1}),
             },
             "optional": {
+                "context_options": ("BERNINI_CTX", {"tooltip": "Context window config from BerniniR_ContextWindow. Connect to enable temporal window tiling."}),
                 "guidance_config": ("BERNINI_GUIDANCE_CONFIG", {"tooltip": "Guidance strategy from BerniniR_GuidanceConfig."}),
                 "block_swap_args": ("BERNINI_BLOCKSWAP", {"tooltip": "Block swap config from BerniniR_BlockSwapArgs. Leave disconnected to disable."}),
                 "add_noise": ("BOOLEAN", {"default": True}),
