@@ -536,6 +536,7 @@ class BerniniR_KSampler:
                 "flow_shift": ("FLOAT", {"default": 3.0, "min": 0.1, "max": 100.0, "step": 0.1, "tooltip": "Sigma schedule shift. Bernini-R trained with 3.0. Higher = more low-noise steps, sharper details"}),
             },
             "optional": {
+                "context_options": ("BERNINI_CTX", {"tooltip": "Context window config from BerniniR_ContextWindow. Connect to enable temporal window tiling for long videos."}),
                 "guidance_config": ("BERNINI_GUIDANCE_CONFIG", {"tooltip": "Guidance strategy + params from BerniniR_GuidanceConfig. Leave disconnected for plain CFG."}),
                 "block_swap_args": ("BERNINI_BLOCKSWAP", {"tooltip": "Block swap config from BerniniR_BlockSwapArgs. Leave disconnected to disable."}),
                 "teacache_args": ("BERNINI_TEACACHE", {"tooltip": "TeaCache config from BerniniR_TeaCacheArgs. Leave disconnected to disable TeaCache."}),
@@ -657,5 +658,7 @@ class BerniniR_KSampler:
         out["samples"] = samples
 
         return (out,)
+
+
 
 
