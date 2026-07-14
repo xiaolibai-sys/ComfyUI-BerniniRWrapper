@@ -448,11 +448,8 @@ In `BerniniR Prompt Embedding`:
 
 - **Renderer-only**: This package uses **Bernini-R**, the renderer-only variant. It does not include the 7B MLLM semantic planner from the full Bernini pipeline, so complex instruction decomposition and chain-of-thought reasoning are not available.
 - **Model capacity**: The 1.3B checkpoint handles style transfer, watermark removal, local edits, and reference-guided edits. For complex human generation and multi-step reasoning, the 14B variant provides higher quality. Both are supported by this package.
-- **T2V-based architecture**: The underlying diffusion model is fine-tuned from `Wan2.1-T2V-1.3B` and uses `context_latents` for visual conditioning rather than native Wan I2V modules (`img_emb` / `ref_conv`).
-- **Bundled VAE wrapper**: The VAE loader uses the in-package `BerniniRVAE` wrapper (`utils/vae_wrapper.py`) providing tiled decode and color transfer; the native ComfyUI VAE is not used for Bernini-R models.
 - **Private types**: `BERNINI_CTX`, `BERNINI_GUIDANCE`, `BERNINI_ATTN`, and `BERNINI_BLOCKSWAP` are custom socket types. Mixing these nodes with native ComfyUI samplers requires adapters.
 - **Windows torch.compile caveats**: `torch._dynamo.config.suppress_errors = True` is enabled, which hides compile failures and may silently fall back to eager mode.
-- **Long-context requires 5D latents**: Context-window logic expects `(B, C, T, H, W)`. Without it, the sampler passes the latent through unchanged.
 ---
 
 ## Troubleshooting
