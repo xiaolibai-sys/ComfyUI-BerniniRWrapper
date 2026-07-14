@@ -340,6 +340,29 @@ class BlockSwapManager:
         self._init_state()
 
     # ------------------------------------------------------------------
+    # Public attribute accessors (used by the model's forward pass)
+    # ------------------------------------------------------------------
+
+    @property
+    def window(self) -> int:
+        """Sliding-window size in blocks (GPU-resident count).
+
+        Mirrors ``_window.window_size`` so the forward pass can cheaply
+        check whether the configured window changed without reaching into
+        the internal ``_window`` state object.
+        """
+        return self._window.window_size
+
+    @property
+    def device(self) -> "torch.device | str":
+        """GPU compute device blocks/activations are streamed to.
+
+        Mirrors ``_xfer.device`` (defaults to ``"cuda"`` when the manager
+        is constructed without an explicit device).
+        """
+        return self._xfer.device
+
+    # ------------------------------------------------------------------
     # Initialisation
     # ------------------------------------------------------------------
 
