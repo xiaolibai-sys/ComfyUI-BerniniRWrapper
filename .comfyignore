@@ -1,0 +1,4 @@
+# Files kept in git but excluded from the published registry archive.
+# (text_embed_cache/ is already git-ignored, listed here for explicit intent.)
+text_embed_cache/
+.workbuddy/

@@ -1,0 +1,5 @@
+# torch is provided by ComfyUI — do not declare it here; reinstalling it
+# can downgrade or break the user's ComfyUI environment.
+numpy>=1.21.0
+einops>=0.6.0
+tqdm>=4.60.0

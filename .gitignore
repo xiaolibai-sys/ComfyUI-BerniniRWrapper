@@ -1,0 +1,20 @@
+# ----- Python -----
+__pycache__/
+*.pyc
+*.pyo
+
+# ----- Runtime-generated model/embed caches (large, regenerated) -----
+text_embed_cache/
+*.pt
+*.bin
+*.safetensors
+
+# ----- Project memory / tooling (not part of the node) -----
+.workbuddy/
+
+# ----- Stray / editor -----
+nul
+.vscode/
+node_modules/
+.venv/
+.env
