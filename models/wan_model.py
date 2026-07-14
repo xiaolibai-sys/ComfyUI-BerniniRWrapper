@@ -1137,8 +1137,8 @@ def _apply_streaming_loras(base: torch.Tensor, groups: list, scale: torch.Tensor
 def _fold_group_loras(sub_group: dict, prefix: str, lora_groups: dict | None):
     """Fold LoRAs whose base key lives under *prefix* into *sub_group* in place.
 
-    Shared by the eager streaming loader and the on-demand ``BlockDiskSource``
-    so block-swap can fold LoRA at the exact moment a block is read from disk.
+    Used by the eager streaming loader so block-swap can fold LoRA at the
+    exact moment a block group is read from disk.
     """
     if not lora_groups:
         return
@@ -1155,71 +1155,6 @@ def _fold_group_loras(sub_group: dict, prefix: str, lora_groups: dict | None):
             sub_group[local + ".weight_scale"] = new_scale
 
 
-class BlockDiskSource:
-    """On-demand, per-block weight loader for **streaming block-swap**.
-
-    Only cheap metadata is kept resident: the safetensors index, the list of
-    tensor keys belonging to each block, the pre-grouped LoRA folds, and a
-    per-block size estimate.  The ~14 GB of weights themselves are *never* all
-    in RAM at once -- each block is read from disk the instant the swap manager
-    needs it on GPU, its LoRA is fused inline, and the CPU copy is released on
-    eviction.  Peak host RAM therefore stays at roughly one GPU window of blocks
-    plus a single in-flight block, which is what lets a 23 GB machine run the
-    dual-expert switch without both 14 GB models resident simultaneously.
-    """
-
-    def __init__(self, model_path, norm_map, block_plan, lora_groups,
-                 block_bytes, block_mb, param_dtype=None):
-        self.model_path = model_path
-        self.norm_map = norm_map            # norm_key -> raw safetensors key
-        self.block_plan = block_plan        # idx -> [norm_key, ...]
-        self.lora_groups = lora_groups      # norm_full_key -> [ {A,B,alpha,strength} ]
-        self.block_bytes = block_bytes      # idx -> total bytes (host RAM)
-        self._block_mb = block_mb           # idx -> VRAM MB estimate
-        self.param_dtype = param_dtype
-        self._reader = None
-
-    # ── size estimates (for VRAM budgeting) ──────────────────────────
-    def estimate_block_mb(self) -> float:
-        """Average per-block VRAM estimate in MB."""
-        if self._block_mb:
-            return sum(self._block_mb.values()) / len(self._block_mb)
-        return 0.0
-
-    # ── lifecycle ────────────────────────────────────────────────────
-    def _open(self):
-        if self._reader is None:
-            self._reader = _SafetensorsFileReader(self.model_path)
-        return self._reader
-
-    def close(self):
-        if self._reader is not None:
-            try:
-                self._reader.__exit__(None, None, None)
-            except Exception:
-                pass
-            self._reader = None
-
-    # ── on-demand block load ─────────────────────────────────────────
-    def load_block(self, idx: int, dm):
-        """Read block *idx* from disk, fuse its LoRA inline, fill dm.blocks[idx].
-
-        The freshly loaded block lives on CPU (host RAM); the caller is
-        responsible for moving it to GPU (BlockSwapManager._to_gpu) and for
-        freeing the CPU copy on eviction.
-        """
-        if idx not in self.block_plan:
-            return
-        reader = self._open()
-        prefix = "blocks.%d." % idx
-        group = {}
-        for nk in self.block_plan[idx]:
-            group[nk] = reader.get_tensor(self.norm_map[nk])
-        # Fold LoRAs targeting this block (mirrors _stream_load_group).
-        _fold_group_loras(group, prefix, self.lora_groups)
-        sub_group = {k[len(prefix):]: v for k, v in group.items()
-                     if k.startswith(prefix)}
-        dm.blocks[idx].load_state_dict(sub_group, strict=False, assign=False)
 
 
 def _load_bernini_model_safetensors_streaming(
