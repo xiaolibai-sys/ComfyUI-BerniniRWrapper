@@ -78,7 +78,6 @@ All visual inputs are encoded into `context_latents` and attached to the conditi
 
 ## Features
 
-- **Self-contained Bernini-R inference** — no dependency on `ComfyUI-WanVideoWrapper`.
 - **Lazy streaming model loading** — model loaders return lightweight handles at node execution; disk I/O, weight transfer to GPU, and LoRA merging are deferred until sampling starts. An LRU cache in the handle layer avoids reloading the same model on repeated runs, and warmup can pre-fetch weights before the first denoising step.
 - **Unified generation & editing** — one checkpoint handles T2V, I2V, V2V, reference-guided editing, and more.
 - **Seven-mode guidance family** — CFG, APG, RAAG, S2, Z2, STG_A, STG_R (see [Guidance Modes](#guidance-modes)).
