@@ -41,7 +41,7 @@ Bernini is a unified video generation and editing framework developed by ByteDan
 The 1.3B checkpoint handles style transfer, watermark removal, local edits, and reference-guided edits with quality close to the 14B variant. For complex human generation and multi-step reasoning, the 14B checkpoint provides a meaningful quality uplift.
 
 > **Paper:** *Bernini: Latent Semantic Planning for Video Diffusion* (arXiv:2605.22344, 2026)  
-> **Weights:** `ByteDance/Bernini-R-1.3B-Diffusers`
+> **Weights:** `ByteDance/Bernini-R-1.3B-Diffusers`/`ByteDance/Bernini-Diffusers`
 
 ---
 
@@ -152,9 +152,9 @@ ComfyUI-BerniniR uses the standard ComfyUI model folders.
 
 ### Diffusion model
 
-- **1.3B (recommended):** `ByteDance/Bernini-R-1.3B-Diffusers` converted to ComfyUI-compatible `.safetensors`. Based on **Wan2.1-T2V-1.3B**, single-expert (non-MoE), ~2.6 GB checkpoint.
+- **1.3B:** `ByteDance/Bernini-R-1.3B-Diffusers` converted to ComfyUI-compatible `.safetensors`. Based on **Wan2.1-T2V-1.3B**, single-expert (non-MoE), ~2.6 GB checkpoint.
 - **14B:** The 14B Bernini-R variant also loads through the same nodes. Based on the larger Wan 2.2-A14B backbone.
-- Standard Wan / Wan 2.1 diffusion models may also load, but only Bernini-R weights expose the editing capabilities.
+- Standard Wan / Wan 2.1 diffusion models may also load, but I have been not testing it.
 
 ### Text encoder
 
