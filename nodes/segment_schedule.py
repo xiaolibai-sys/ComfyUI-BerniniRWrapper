@@ -72,6 +72,16 @@ def parse_segments(text: str) -> list[SegmentSpec]:
             continue
         start = int(m.group(1))
         end = int(m.group(2))
+        if start > end:
+            # Reversed range (e.g. "30-10") is almost always a typo; swap it
+            # rather than producing an empty / negative-length segment that
+            # would break the scheduler's frame arithmetic.
+            logger.warning(
+                "[BerniniR] SegmentSchedule: malformed range %d-%d "
+                "(start > end); swapping to %d-%d.",
+                start, end, end, start,
+            )
+            start, end = end, start
         prompt = m.group(3).strip()
         if not prompt:
             continue
@@ -302,6 +312,7 @@ class BerniniR_SegmentSchedule:
             uncached.append(negative_prompt)
             neg_cond_out = None
 
+        clip_loaded_internally = False
         if uncached:
             try:
                 if clip is None:
@@ -312,6 +323,7 @@ class BerniniR_SegmentSchedule:
                         "[BerniniR] SegmentSchedule: loading CLIP on demand: %s",
                         clip_name)
                     clip = _load_clip_internal(clip_name, clip_type, clip_device)
+                    clip_loaded_internally = True
 
                 for p in uncached:
                     cond_out = _encode_text(clip, p)
@@ -323,7 +335,9 @@ class BerniniR_SegmentSchedule:
                     if use_disk_cache:
                         _save_cached_conditioning(p, cond_out, tag)
             finally:
-                if force_offload and clip is not None:
+                if force_offload and clip is not None and clip_loaded_internally:
+                    # Only release a CLIP we loaded ourselves; a CLIP passed in
+                    # by the user is shared input and must not be unloaded here.
                     del clip
                     collect_garbage()
 

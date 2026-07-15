@@ -55,32 +55,22 @@ def _resize_mask_to_latent(mask, t_latent, h_latent, w_latent, device):
 
 
 def _resize_long_edge(image: torch.Tensor, max_size: int, stride: int = 16) -> torch.Tensor:
-    """Resize image so its long edge is at most max_size, snapped to stride."""
-    B, H, W, C = image.shape
-    if max(H, W) <= max_size:
-        h_snapped = (H // stride) * stride
-        w_snapped = (W // stride) * stride
-        if h_snapped != H or w_snapped != W:
-            image = comfy.utils.common_upscale(
-                image.movedim(-1, 1), w_snapped, h_snapped, "area", "disabled"
-            ).movedim(1, -1)
-        return image
+    """Resize image so its long edge is at most max_size, snapped to stride.
 
-    if H >= W:
-        new_h = (max_size // stride) * stride
-        scale = new_h / H
-        new_w = int(W * scale)
-        new_w = (new_w // stride) * stride
-    else:
-        new_w = (max_size // stride) * stride
-        scale = new_w / W
-        new_h = int(H * scale)
-        new_h = (new_h // stride) * stride
-
-    image = comfy.utils.common_upscale(
-        image.movedim(-1, 1), new_w, new_h, "area", "disabled"
+    Mirrors the official ComfyUI BerniniConditioning node's helper exactly:
+    scale by ``min(max_size / max(h, w), 1.0)``, snap both edges to ``stride``
+    with ``round`` (NOT floor), and ALWAYS re-upscale (even when already within
+    max_size) so the result is deterministic and matches the reference node.
+    The ``max(stride, ...)`` floor also guards the degenerate long-edge <
+    stride case (e.g. a 1000×10 strip) so the VAE never sees a 0-dim input.
+    """
+    h, w = image.shape[1], image.shape[2]
+    scale = min(max_size / max(h, w), 1.0)
+    nh = max(stride, round(h * scale / stride) * stride)
+    nw = max(stride, round(w * scale / stride) * stride)
+    return comfy.utils.common_upscale(
+        image[:, :, :, :3].movedim(-1, 1), nw, nh, "area", "disabled"
     ).movedim(1, -1)
-    return image
 
 
 # ---------------------------------------------------------------------------
@@ -123,8 +113,10 @@ def _encode_video_chunked(
     if F <= chunk_frames:
         return _encode_single(vae, video)
 
-    # Enforce minimum overlap of one latent frame (4 pixel frames)
-    temporal_overlap = max(temporal_overlap, 4)
+    # Enforce minimum overlap of one latent frame (4 pixel frames), and snap
+    # to a multiple of 4 so the latent-space trim arithmetic stays exact for
+    # any caller (not just the UI-constrained 4-multiples).
+    temporal_overlap = max((temporal_overlap // 4) * 4, 4)
     stride = chunk_frames - temporal_overlap
     if stride <= 0:
         return _encode_single(vae, video)
@@ -298,25 +290,50 @@ class BerniniR_Conditioning:
         # ── Build context latents ────────────────────────────────────
         context_latents = []
 
-        # 1) source_video → trim to length, strip to 3 channels, encode with chunking
+        # 1) source_video → trim to length, strip to 3 channels, encode with chunking.
+        #    Parity with the official ComfyUI BerniniConditioning node: the source
+        #    is the edit *canvas*, attached as in-context reference. We only trim
+        #    to `length`; if it is shorter we use all available frames (NO
+        #    loop-pad). context_latents are concatenated along the sequence dim in
+        #    wan_model.pre_forward and need NOT match the main latent's T dim, so
+        #    padding would be both unnecessary and semantically wrong (it would
+        #    make the source loop as a repeating reference).
         if source_video is not None:
+            src = source_video
+            if src.shape[0] < length:
+                logger.info(
+                    "[BerniniR] source_video has %d frames < length=%d; "
+                    "using all available frames as in-context reference "
+                    "(no loop-pad, matching official BerniniConditioning).",
+                    src.shape[0], length,
+                )
             logger.info(
                 f"[BerniniR] Encoding source_video: "
-                f"shape={list(source_video.shape)}, chunks≤{chunk_frames}"
+                f"shape={list(src.shape)}, chunks≤{chunk_frames}"
             )
             source_resized = comfy.utils.common_upscale(
-                source_video[:length, :, :, :3].movedim(-1, 1), width, height, "area", "center"
+                src[:length, :, :, :3].movedim(-1, 1), width, height, "area", "center"
             ).movedim(1, -1)  # [F, H, W, C]
             source_latent = _encode_video_chunked(vae, source_resized, chunk_frames, chunk_overlap)
             context_latents.append(source_latent)
 
-        # 2) reference_video → trim, strip, encode with chunking
+        # 2) reference_video → trim, strip, encode with chunking.
+        #    Same as source_video: trim to length, NO loop-pad (official parity).
+        #    reference_video is moving content composited in, used as in-context
+        #    reference tokens; its T dim need not match the main latent.
         if reference_video is not None:
+            ref = reference_video
+            if ref.shape[0] < length:
+                logger.info(
+                    "[BerniniR] reference_video has %d frames < length=%d; "
+                    "using all available frames as in-context reference.",
+                    ref.shape[0], length,
+                )
             logger.info(
                 f"[BerniniR] Encoding reference_video: "
-                f"shape={list(reference_video.shape)}"
+                f"shape={list(ref.shape)}"
             )
-            ref_resized = _resize_long_edge(reference_video[:length, :, :, :3], ref_max_size)
+            ref_resized = _resize_long_edge(ref[:length, :, :, :3], ref_max_size)
             ref_latent = _encode_video_chunked(vae, ref_resized, chunk_frames, chunk_overlap)
             context_latents.append(ref_latent)
 

@@ -156,6 +156,7 @@ class BerniniR_PromptEmbedding:
         use_disk_cache: bool = True,
         cache_tag: str = "",
     ):
+        clip_loaded_internally = False
         # ── Select system prompt ──────────────────────────────────────
         task_index = TASK_OPTIONS.index(task_type) if task_type in TASK_OPTIONS else 0
         system_prompt = SYSTEM_PROMPTS[task_index]
@@ -178,8 +179,8 @@ class BerniniR_PromptEmbedding:
 
         if positive is not None and negative is not None:
             logger.info("[BerniniR] Both prompts served from disk cache; skipping CLIP load.")
-            if force_offload and clip is not None:
-                clip = None  # drop reference
+            if force_offload and clip is not None and clip_loaded_internally:
+                clip = None  # drop reference to our internally-loaded CLIP
             collect_garbage()
             return (positive, negative, system_prompt, full_prompt)
 
@@ -193,6 +194,7 @@ class BerniniR_PromptEmbedding:
                     )
                 logger.info(f"[BerniniR] Loading CLIP on demand: {clip_name}")
                 clip = _load_clip_internal(clip_name, clip_type, clip_device)
+                clip_loaded_internally = True
 
             # ── Encode positive ───────────────────────────────────────
             if positive is None:
@@ -207,7 +209,9 @@ class BerniniR_PromptEmbedding:
                     _save_cached_conditioning(negative_prompt, negative, tag)
 
         finally:
-            if force_offload and clip is not None:
+            if force_offload and clip is not None and clip_loaded_internally:
+                # Only release a CLIP we loaded ourselves; a CLIP passed in by
+                # the user is shared input and must not be unloaded here.
                 del clip
                 collect_garbage()
 

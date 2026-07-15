@@ -53,13 +53,22 @@ def _make_cache_key(
     lora_specs: list | None,
     compile_cfg: dict | None,
     attn_backend_args: dict | None,
+    block_swap: bool = False,
 ) -> str:
-    """Stable hash of the full model config for cache lookup."""
+    """Stable hash of the full model config for cache lookup.
+
+    ``block_swap`` MUST be part of the key: it changes the patcher's
+    ``load_device`` and attaches a ``BlockSwapManager`` to
+    ``diffusion_model`` (see ``wan_model.load_bernini_model``).  Reusing a
+    non-block-swap patcher for a block-swap request would leave the model on
+    the GPU with no manager, breaking block swapping at runtime.
+    """
     _loras = sorted([(str(p), float(s)) for p, s in (lora_specs or [])])
     _compile = dict(sorted(compile_cfg.items())) if compile_cfg else {}
     _attn = dict(sorted(attn_backend_args.items())) if attn_backend_args else {}
     raw = json.dumps(
-        dict(path=model_path, loras=_loras, compile=_compile, attn=_attn),
+        dict(path=model_path, loras=_loras, compile=_compile, attn=_attn,
+             block_swap=block_swap),
         sort_keys=True,
     )
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
@@ -180,6 +189,7 @@ class BerniniRModelHandle:
         cache_key = _make_cache_key(
             self.model_path, self.lora_specs,
             self.compile_cfg, self.attn_backend_args,
+            block_swap=self.block_swap,
         )
         cached: Any | None = _model_cache.get(cache_key)
         if cached is not None:

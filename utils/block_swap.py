@@ -517,6 +517,10 @@ class BlockSwapManager:
         """How many blocks we can safely prefetch given free VRAM."""
         if not self._xfer.prefetch or self._xfer._stream is None:
             return 0
+        if self._budget.block_mb <= 0:
+            # A block group with no parameters (e.g. a norm-only slice)
+            # would divide by zero below; nothing to prefetch.
+            return 0
         free_mb = self._budget.free_mb(self._xfer.device)
         reserve_mb = self._budget.block_mb * 2
         avail_mb = max(0.0, free_mb - reserve_mb)
