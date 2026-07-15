@@ -36,7 +36,7 @@ Bernini is a unified video generation and editing framework developed by ByteDan
 - An **MLLM semantic planner** (Qwen 2.5-VL-7B) for understanding complex instructions.
 - A **DiT renderer** based on Wan 2.2-A14B for pixel generation.
 
-**Bernini-R** is the renderer-only variant. It drops the MLLM planner and operates as a fine-tuned Wan diffusion renderer with direct text and visual conditioning. This package supports both the **1.3B** and **14B** checkpoints. The 1.3B version is based on **Wan2.1-T2V-1.3B** and runs on consumer GPUs; the 14B version uses the larger Wan 2.2-A14B backbone. Both share the same architecture and load through the same nodes.
+**Bernini-R** is the renderer-only variant. It drops the MLLM planner and operates as a fine-tuned Wan diffusion renderer with direct text and visual conditioning. This package supports both the **1.3B** and **14B** checkpoints. The 1.3B version is based on **Wan2.1-T2V-1.3B** / ** Wan 2.2-A14B** and runs on consumer GPUs; the 14B version uses the larger Wan 2.2-A14B backbone. Both share the same architecture and load through the same nodes.
 
 The 1.3B checkpoint handles style transfer, watermark removal, local edits, and reference-guided edits with quality close to the 14B variant. For complex human generation and multi-step reasoning, the 14B checkpoint provides a meaningful quality uplift.
 
