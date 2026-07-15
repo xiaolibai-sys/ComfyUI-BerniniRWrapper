@@ -38,7 +38,7 @@ class InjectionContext:
     """All injection data extracted once at sampling start.
 
     Built by :meth:`build` from the raw node inputs, then consumed by
-    :meth:`apply_options`, :meth:`apply_model`, :meth:`clear_model`, and
+    :meth:`apply_options`, :meth:`apply_block_swap`, and
     :meth:`apply_noise`.
 
     Attributes prefixed with ``_dd_`` feed the differential-diffusion path
@@ -66,9 +66,6 @@ class InjectionContext:
     # -- parsed STG -----------------------------------------------------------
     stg_blocks: list[int] = field(default_factory=list)
     stg_mode: str = "A"
-
-    # -- cached for clear_model -----------------------------------------------
-    _total_blocks: int = 0
 
     # ------------------------------------------------------------------
     # Factory

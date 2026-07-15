@@ -224,7 +224,7 @@ class BerniniRModelHandle:
             block_swap=block_swap,
         )
 
-        # 5. Set device targets.
+        # 3. Set device targets.
         #    - Block swap ON: the weights are the single source of truth on the
         #      offload device (CPU).  BlockSwapManager moves only a sliding
         #      window onto the GPU during the forward pass, so GPU + CPU
@@ -239,7 +239,7 @@ class BerniniRModelHandle:
         else:
             patcher.load_device = mm.get_torch_device()
 
-        # 6. torch.compile if requested.
+        # 4. torch.compile if requested.
         if self.compile_cfg and self.compile_cfg.get("mode", "none") != "none":
             from ..models.wan_compile import compile_wan_model
             compile_wan_model(
@@ -249,7 +249,7 @@ class BerniniRModelHandle:
                 dynamic=self.compile_cfg.get("dynamic_shapes", True),
             )
 
-        # 7. Store in module-level cache so re-runs skip disk + build
+        # 5. Store in module-level cache so re-runs skip disk + build
         _cache_put(cache_key, patcher)
         self._model_patcher = patcher
         return patcher
@@ -299,7 +299,7 @@ class BerniniRModelHandle:
         self._model_patcher = None
         del patcher
 
-        # 5. Blocking CUDA cleanup.
+        # 4. Blocking CUDA cleanup.
         if torch.cuda.is_available():
             try:
                 torch.cuda.synchronize()

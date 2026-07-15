@@ -152,17 +152,98 @@ else:
 import torch._inductor.config as _inductor_config
 _inductor_config.cpp_wrapper = False
 
-# Purge stale inductor cache — previous runs may have cached failed
-# C++ compilations that won't be retried even after the INCLUDE fix.
+# ── Scoped, safe compile cache ──────────────────────────────────────
+# Previously this module did ``shutil.rmtree(torch._inductor.codecache.cache_dir())``
+# on EVERY import.  That path is torch's *global* inductor cache, shared by every
+# other project/model on the machine — so a Bernini-R restart would wipe everyone
+# else's compiled graphs and force full recompiles.  We now isolate Bernini-R's
+# compiled artifacts in a dedicated directory and only purge them when (a) this
+# package's compiled-graph contract changes (a version sentinel) or (b) the user
+# explicitly asks via BERNINI_PURGE_COMPILE_CACHE.
+import tempfile as _tempfile
 import torch._inductor.codecache as _codecache
 import shutil as _shutil
-try:
-    _cachedir = _codecache.cache_dir()
-    if os.path.isdir(_cachedir):
-        _shutil.rmtree(_cachedir, ignore_errors=True)
-        logger.info("[BerniniR] Inductor cache purged: %s", _cachedir)
-except Exception:
-    pass
+
+# Bump when a code change invalidates previously compiled graphs (e.g. the
+# forward signature, RoPE handling, or hook behaviour changes).
+_BERNINI_CACHE_VERSION = "1"
+
+
+def _bernini_compile_cache_dir() -> str:
+    """Return a Bernini-R-isolated inductor/dynamo cache directory.
+
+    Honours BERNINI_COMPILE_CACHE_DIR; otherwise a process-local temp dir.
+    This is NOT torch's global cache, so purging it never touches other
+    projects.
+    """
+    env = os.environ.get("BERNINI_COMPILE_CACHE_DIR")
+    if env:
+        return os.path.abspath(env)
+    return os.path.join(_tempfile.gettempdir(), "bernini_r_inductor_cache")
+
+
+_BERNINI_CACHE = _bernini_compile_cache_dir()
+os.makedirs(_BERNINI_CACHE, exist_ok=True)
+# inductor (and dynamo's FX graph cache) resolve their cache dir from these
+# env vars *at call time*, so setting them here — at import, before any
+# compile — redirects every compiled artifact into our scoped directory.
+# (Assigning torch._inductor.config.cache_dir raises on torch>=2.10, hence
+# the env-var route.)
+os.environ["TORCHINDUCTOR_CACHE_DIR"] = _BERNINI_CACHE
+os.environ["TORCH_COMPILE_CACHE_DIR"] = _BERNINI_CACHE
+
+
+def purge_compile_cache(force: bool = False) -> bool:
+    """Delete Bernini-R's isolated compile cache.
+
+    Safe by construction: only ever touches the directory returned by
+    ``_bernini_compile_cache_dir`` (a Bernini-R temp dir), never the global
+    torch cache shared by other projects.  Returns True if a purge occurred.
+    """
+    target = _bernini_compile_cache_dir()
+    if not os.path.isdir(target):
+        return False
+    try:
+        _shutil.rmtree(target, ignore_errors=True)
+        os.makedirs(target, exist_ok=True)
+        return True
+    except Exception as e:
+        logger.warning("[BerniniR] Failed to purge compile cache %s: %s", target, e)
+        return False
+
+
+def _maybe_auto_purge_compile_cache() -> None:
+    """Auto-purge stale compiled graphs only when the code contract changes.
+
+    Replaces the old unconditional global rmtree: normal restarts keep the
+    cache (fast), but an upgrade that changes the compiled graph invalidates
+    it exactly once.  BERNINI_PURGE_COMPILE_CACHE=1 forces a manual purge.
+    """
+    sentinel = os.path.join(_BERNINI_CACHE, ".bernini_cache_version")
+    prev = ""
+    if os.path.isfile(sentinel):
+        try:
+            with open(sentinel, "r") as _f:
+                prev = _f.read().strip()
+        except Exception:
+            prev = ""
+    if prev != _BERNINI_CACHE_VERSION:
+        if purge_compile_cache():
+            logger.info(
+                "[BerniniR] Compile cache purged on version change (%s -> %s).",
+                prev or "<none>", _BERNINI_CACHE_VERSION,
+            )
+        try:
+            with open(sentinel, "w") as _f:
+                _f.write(_BERNINI_CACHE_VERSION)
+        except Exception:
+            pass
+    if os.environ.get("BERNINI_PURGE_COMPILE_CACHE", "").lower() in ("1", "true", "yes"):
+        if purge_compile_cache():
+            logger.info("[BerniniR] Compile cache purged (BERNINI_PURGE_COMPILE_CACHE).")
+
+
+_maybe_auto_purge_compile_cache()
 
 
 # ===========================================================================

@@ -1,7 +1,7 @@
 """
 Shared text-embedding disk cache and CLIP encoding helpers.
 
-Used by both ``PromptEmbedding`` and ``PromptSchedule`` nodes to avoid
+Used by both ``PromptEmbedding`` and ``SegmentSchedule`` nodes to avoid
 duplicated encoding of identical prompts across workflow runs.
 """
 

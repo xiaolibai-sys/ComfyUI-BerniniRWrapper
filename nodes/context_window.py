@@ -2,7 +2,8 @@
 Context window configuration node for Bernini-R.
 
 Mirrors WanVideoWrapper's WanVideoContextOptions node exactly:
-pixel-frame parameters are converted to latent space by the sampler.
+pixel-frame parameters are converted to latent space when the
+BerniniContext is constructed (see utils/types.py:70), not by the sampler.
 
 Inputs configure how long videos are split into temporal windows during
 denoising, including scheduling strategy, window size, overlap, and blending.

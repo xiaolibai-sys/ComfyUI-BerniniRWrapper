@@ -99,7 +99,7 @@ class BerniniR_GuidanceStrengthSchedule:
     """Generate a per-step guidance ceiling schedule.
 
     Connect the output to the ``guidance_schedule`` input of
-    ``BerniniR_KSampler`` or ``BerniniR_KSamplerTeaCache``.  The sampler
+    ``BerniniR_KSampler``.  The sampler
     passes this schedule to :class:`~.bernini_sampling.BerniniModelWrapper`
     which uses each value as the per-step *w_max* for the selected guidance
     mode (CFG / APG / RAAG / S2).

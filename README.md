@@ -219,7 +219,7 @@ All 19 nodes appear under the **Bernini-R** category in ComfyUI.
 
 ## Guidance Modes
 
-The sampler exposes a `guidance_mode` dropdown with **seven mutually exclusive strategies**. Exactly one strategy is active per run; the sampler routes the combine step accordingly.
+The `BerniniR Guidance Config` node exposes a `guidance_mode` dropdown with **seven mutually exclusive strategies**. Exactly one strategy is active per run; the sampler routes the combine step accordingly.
 
 | Mode | Forward passes | Description |
 |---|---|---|
@@ -435,6 +435,10 @@ BerniniR Segment Schedule ──> positive ──┐
 3. Enable `torch.compile` in the model loader:
    - On Windows, `reduce-overhead` and `max-autotune` are automatically downgraded to `default`.
    - Use `default` mode for the best Windows compatibility.
+   - **TeaCache + torch.compile**: both can be enabled together. When a compiled
+     model is also TeaCache-accelerated, TeaCache restores the eager transformer
+     forward so its block-skipping hooks take effect (earlier versions could let
+     compile silently disable TeaCache).
 
 ### Reduce host RAM / CLIP VRAM
 
@@ -484,6 +488,17 @@ Make sure any `BerniniR Guidance Strength Schedule` node is connected correctly 
 ### torch.compile fails silently or falls back
 
 This is expected on Windows due to `suppress_errors=True`. Check the console for Inductor cache warnings, or disable compile and test eager-mode first.
+
+If you change the model or suspect a stale compiled graph, purge the Inductor
+cache. The cache is now **isolated** to `%TEMP%/bernini_r_inductor_cache`
+(override with `BERNINI_COMPILE_CACHE_DIR`) and is auto-cleared only when the
+code version changes. To force a purge:
+
+- **In-workflow**: enable the `purge_cache` toggle on `BerniniR Compile Model`, or
+- **Environment**: set `BERNINI_PURGE_COMPILE_CACHE=1` before launching ComfyUI.
+
+This replaces the old behaviour of deleting torch's *global* inductor cache on
+every start, which could wipe compile artifacts for other projects.
 
 ### Seams between context windows
 

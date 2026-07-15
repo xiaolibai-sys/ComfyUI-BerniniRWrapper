@@ -96,6 +96,11 @@ class BerniniR_CompileModel:
         fullgraph (BOOLEAN): Require no graph breaks.
         dynamic_shapes (BOOLEAN): Allow dynamic shapes.
 
+    Optional:
+        purge_cache (BOOLEAN): Delete Bernini-R's isolated torch.compile cache
+            before compiling.  Use after a code update, or if you see stale /
+            incorrect compiled output.  Only touches Bernini-R's own cache dir.
+
     Output:
         BERNINI_MODEL_HANDLE: Handle with compile config stored.
     """
@@ -109,6 +114,9 @@ class BerniniR_CompileModel:
                 "compile_mode": (COMPILE_MODES, {"default": "none", "tooltip": "torch.compile mode. 'none' = eager, 'default' = trace w/ graph breaks, 'reduce-overhead' → auto-downgraded to 'default' on Windows"}),
                 "fullgraph": ("BOOLEAN", {"default": False, "tooltip": "Require zero graph breaks (will likely fail with custom attention ops)"}),
                 "dynamic_shapes": ("BOOLEAN", {"default": True, "tooltip": "Allow variable-length sequences in compiled graph"}),
+            },
+            "optional": {
+                "purge_cache": ("BOOLEAN", {"default": False, "tooltip": "Delete Bernini-R's isolated torch.compile cache before compiling (after a code update, or if compiled output looks stale)"}),
             },
         }
 
@@ -124,7 +132,12 @@ class BerniniR_CompileModel:
         compile_mode: str = "none",
         fullgraph: bool = False,
         dynamic_shapes: bool = True,
+        purge_cache: bool = False,
     ):
+        if purge_cache:
+            from ..models.wan_compile import purge_compile_cache
+            if purge_compile_cache():
+                logger.info("[BerniniR] Compile cache purged via BerniniR_CompileModel(purge_cache=True).")
         if compile_mode == "none":
             return (model_handle,)
         new_handle = model_handle.clone_with_compile(

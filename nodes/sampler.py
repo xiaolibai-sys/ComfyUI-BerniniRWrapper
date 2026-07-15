@@ -575,19 +575,20 @@ class BerniniR_KSampler:
         add_noise: bool = True,
         guidance_schedule: BerniniGuidance | None = None,
     ):
-        # ── Apply FreeNoise to the initial noise BEFORE sampling ──────
-        # FreeNoise must see the same noise shape that the sampler will
-        # use.  We compute it here and pass add_noise=False to the
-        # sampler so it doesn't re-generate noise.
+        # ── Prepare initial noise ─────────────────────────────────────
+        # NOTE: FreeNoise is intentionally NOT applied here.  It is applied
+        # exactly ONCE inside bernini_sample / bernini_sample_dual, via
+        # InjectionContext.apply_noise, after the unified injection context is
+        # built and with the canonical seed.  Applying it here too would shuffle
+        # the noise a *second* time (permutation-squared) on the single-sampler
+        # path; the dual-expert path used to skip it entirely.  Converging on
+        # the single call site keeps both paths correct.
         latent_samples = latent_image["samples"]
         if add_noise:
             batch_inds = latent_image.get("batch_index", None)
             noise = comfy.sample.prepare_noise(latent_samples, seed, batch_inds)
         else:
             noise = torch.zeros_like(latent_samples)
-
-        if context_options is not None and context_options.freenoise:
-            noise = _apply_freenoise(noise, context_options, seed=seed)
 
         # ── TeaCache: load model early and attach hooks ───────────────
         _tc = None

@@ -155,21 +155,6 @@ class BerniniModelWrapper:
             self._dispatch = 0  # CFG
 
         # ── Differential diffusion state — from InjectionContext ─────
-        _m = mode.upper()
-        if _m.startswith("STG"):
-            self._dispatch = 5  # STG
-        elif _m == "S2":
-            self._dispatch = 4
-        elif _m == "APG":
-            self._dispatch = 3
-        elif _m == "RAAG":
-            self._dispatch = 2
-        elif _m == "Z2":
-            self._dispatch = 1
-        else:
-            self._dispatch = 0  # CFG
-
-        # ── Differential diffusion state — from InjectionContext ─────
         if injection is not None and self._noise is not None:
             self._dd_mask_mode = injection.dd_mask_mode
             self._dd_src_raw = injection.dd_src_latent
@@ -1046,6 +1031,12 @@ def bernini_sample_dual(
         total_blocks=total_blocks,
         context_window_wrapper=_cw_wrapper,
     )
+
+    # ── FreeNoise ───────────────────────────────────────────────
+    # The dual-expert path previously never applied FreeNoise at all.  Apply
+    # it here exactly once, mirroring the single-sampler path (single path
+    # applies it inside the same InjectionContext.apply_noise call site).
+    noise_dev = inj.apply_noise(noise_dev, context_options, seed=use_seed)
 
     # ── Build extra_model_options (single injection call) ─────────────
     extra_model_options = comfy.model_patcher.create_model_options_clone(

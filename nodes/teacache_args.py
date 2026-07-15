@@ -50,7 +50,7 @@ class BerniniR_TeaCacheArgs:
                     "min": 0.0,
                     "max": 1.0,
                     "step": 0.01,
-                    "tooltip": "Skip blocks when L1 distance < threshold. 0.04 = safe (minimal quality loss), 0.12 = fast (may degrade).",
+                    "tooltip": "Skip blocks when the absolute mean L1 distance between consecutive step residuals < threshold (unnormalized). 0.04 = safe (minimal quality loss), 0.12 = fast (may degrade).",
                 }),
                 "warmup_steps": ("INT", {
                     "default": DEFAULT_WARMUP_STEPS,

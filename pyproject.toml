@@ -1,7 +1,7 @@
 [project]
 name = "ComfyUI-BerniniRWrapper" # Unique registry identifier. IMMUTABLE after first publish — change now if you want a different slug.
 description = "Wan-Video based video generation custom node: seven-mode guidance (CFG/APG/RAAG/S2/Z2/STG_A/STG_R), context-window sampling, and segment prompt-travel."
-version = "1.0.2" # Semantic version. Bumping this + pushing pyproject.toml triggers the publish Action.
+version = "1.0.3" # Semantic version. Bumping this + pushing pyproject.toml triggers the publish Action.
 license = { file = "LICENSE.txt" }
 dependencies = [] # Auto-populated from requirements.txt at publish time.
 

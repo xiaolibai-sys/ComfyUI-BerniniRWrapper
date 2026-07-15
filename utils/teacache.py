@@ -73,6 +73,30 @@ class TeaCache:
 
         n_blocks = len(dm.blocks)
         self._wan = dm
+
+        # ── torch.compile incompatibility guard ─────────────────────
+        # If the model was compiled (BerniniR_CompileModel), the compiled
+        # transformer_forward has *inlined* each block.forward into the traced
+        # graph.  TeaCache patches block.forward at sample time, so a patched
+        # block.forward would never be invoked → TeaCache silently does nothing
+        # (no speedup, no error).  Restore the eager forward so our block hooks
+        # actually fire.  This mirrors the existing block-swap guard in
+        # InjectionContext.apply_block_swap.
+        _orig_tf = getattr(self._wan, "_original_transformer_forward", None)
+        _orig_fo = getattr(self._wan, "_original_forward_orig", None)
+        if _orig_tf is not None:
+            self._wan.transformer_forward = _orig_tf
+            logger.warning(
+                "[BerniniR] TeaCache is incompatible with torch.compile — "
+                "compile disabled for this sampling run."
+            )
+        elif _orig_fo is not None:
+            self._wan.forward_orig = _orig_fo
+            logger.warning(
+                "[BerniniR] TeaCache is incompatible with torch.compile — "
+                "compile disabled for this sampling run."
+            )
+
         self._start = max(0, min(start_block, n_blocks - 1))
         self._end = min(self._start + max_skip_blocks, n_blocks)
         self._thresh = rel_l1_thresh
