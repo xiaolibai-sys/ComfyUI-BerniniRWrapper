@@ -4,7 +4,7 @@ A self-contained ComfyUI custom node package for **ByteDance's Bernini-R (1.3B /
 
 > **For developers and maintainers:** see [`README_DEVELOPER.md`](./README_DEVELOPER.md) for entry points, key functions, data flow, and common modification scenarios.
 
-Bernini-R is a renderer-only diffusion model fine-tuned from **Wan2.1-T2V-1.3B**. It retains the T2V architecture but adds in-context conditioning, enabling a single lightweight checkpoint (~2.6 GB) to perform both generation and editing tasks: text-to-video, image-to-video, video-to-video editing, reference-guided editing, and subject-to-video.
+Bernini-R is a renderer-only diffusion model fine-tuned from **Wan2.1-T2V-1.3B**/** Wan 2.2-A14B**. It retains the T2V architecture but adds in-context conditioning, enabling a single lightweight checkpoint (~2.6 GB) to perform both generation and editing tasks: text-to-video, image-to-video, video-to-video editing, reference-guided editing, and subject-to-video.
 
 This package embeds model loading, VAE, temporal context windows, attention backends, TeaCache, NAG, a seven-mode guidance family, and dynamic guidance scheduling in one place. It does not depend on `ComfyUI-WanVideoWrapper`.
 
