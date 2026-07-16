@@ -843,6 +843,11 @@ def bernini_sample(
         inj.apply_block_swap(extra_model_options, inner_model)
 
         # ── FreeNoise ───────────────────────────────────────────────
+        # Clone the i.i.d. noise *before* FreeNoise shuffling so the
+        # differential-diffusion path sees uncorrelated noise (model was
+        # trained on i.i.d. noise at each step).  The FreeNoise-shuffled
+        # copy is used only for k-diffusion's initial x_T.
+        noise_for_dd = noise.clone()
         noise = inj.apply_noise(noise, context_options, seed=use_seed)
 
         # ── Ensure noise is on device ───────────────────────────────
@@ -869,7 +874,7 @@ def bernini_sample(
             z2_collapse=gc.z2_collapse,
             seed=use_seed,
             model_options=extra_model_options,
-            noise=noise,
+            noise=noise_for_dd,  # i.i.d. noise for differential diffusion
             total_steps=steps,
             injection=inj,
         )
@@ -1033,9 +1038,11 @@ def bernini_sample_dual(
     )
 
     # ── FreeNoise ───────────────────────────────────────────────
-    # The dual-expert path previously never applied FreeNoise at all.  Apply
-    # it here exactly once, mirroring the single-sampler path (single path
-    # applies it inside the same InjectionContext.apply_noise call site).
+    # Clone the i.i.d. noise *before* FreeNoise shuffling so the
+    # differential-diffusion path (both high and low wrappers) sees
+    # uncorrelated noise.  The FreeNoise-shuffled copy is used only
+    # for k-diffusion's initial x_T.
+    noise_for_dd = noise_dev.clone()
     noise_dev = inj.apply_noise(noise_dev, context_options, seed=use_seed)
 
     # ── Build extra_model_options (single injection call) ─────────────
@@ -1068,7 +1075,7 @@ def bernini_sample_dual(
         z2_collapse=gc.z2_collapse,
         seed=use_seed,
         model_options=extra_model_options,
-        noise=noise_dev,
+        noise=noise_for_dd,  # i.i.d. noise for differential diffusion (high wrapper)
         total_steps=steps,
         injection=inj,
     )
@@ -1081,7 +1088,7 @@ def bernini_sample_dual(
 
     def _make_low_wrapper():
         nonlocal low_inner, low_conds, low_loaded, _prev_shift_low
-        nonlocal high_patcher, high_inner, high_wrapper, high_model
+        nonlocal high_patcher, high_inner, high_wrapper
 
         logger.info(
             "[BerniniR] Dual-expert split: fully releasing high-noise model before loading low.",
@@ -1131,7 +1138,9 @@ def bernini_sample_dual(
         high_wrapper = None
         high_inner = None
         high_patcher = None
-        high_model = None
+        # Note: high_model is deliberately NOT set to None here.  The handle is
+        # kept alive so the cleanup loop at the end of bernini_sample_dual can
+        # call handle.unload() which now calls release_model_ram -> frees RAM.
         try:
             dual.release_high()
         except Exception:
@@ -1179,7 +1188,7 @@ def bernini_sample_dual(
             z2_collapse=gc.z2_collapse,
             seed=use_seed,
             model_options=extra_model_options,
-            noise=noise_dev,
+            noise=noise_for_dd,  # i.i.d. noise for differential diffusion (low wrapper)
             total_steps=steps,
             injection=inj,
         )

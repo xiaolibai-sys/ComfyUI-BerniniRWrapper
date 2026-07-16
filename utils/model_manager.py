@@ -280,6 +280,12 @@ class BerniniRModelHandle:
 
         patcher = self._model_patcher
 
+        # 0. Shrink all parameter tensors to zero-size before ComfyUI's unload.
+        #    mm.unload_model_and_clones only offloads to CPU — the PyTorch CPU
+        #    allocator never returns pages to the OS on Windows.
+        from .vram import release_model_ram as _release_model_ram
+        _release_model_ram(patcher)
+
         # 1. Evict block-swap blocks before dropping the model so in-flight
         #    async transfers don't touch freed memory.  shutdown() cancels any
         #    prefetch on the transfer stream, synchronises *all* CUDA streams,
