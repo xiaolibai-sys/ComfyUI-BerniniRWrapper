@@ -532,7 +532,7 @@ If you use Bernini in your research, please cite:
 - The following guidance methods are integrated as open-source contributions:
 
   - **APG (Adaptive Projected Guidance)** — Sadat et al., *Eliminating Oversaturation and Artifacts of High Guidance Scales in Diffusion Models*, ICLR 2025. [arXiv:2410.02416](https://arxiv.org/abs/2410.02416)
-  - **RAAG (Ratio-Aware Adaptive Guidance)** — Zhu et al., *RAAG: Ratio Aware Adaptive Guidance*, 2025. [arXiv:2508.03442](https://arxiv.org/abs/2508.03442)
+  - **RAAG (Ratio-Aware Adaptive Guidance)** — Zhu et al., *MAMBO-G: Magnitude-Aware Mitigation for Boosted Guidance*, 2025. [arXiv:2508.03442](https://arxiv.org/abs/2508.03442)
   - **S² (Stochastic Self-Guidance)** — Chen et al., *Stochastic Self-Guidance for Training-Free Enhancement of Diffusion Models*, ICLR 2026. [arXiv:2508.12880](https://arxiv.org/abs/2508.12880)
   - **Z² (Zero-Cost Zigzag Sampling)** — Li et al., *Z²-Sampling: Zero-Cost Zigzag Trajectories for Semantic Alignment in Diffusion Models*, 2026. [arXiv:2604.23536](https://arxiv.org/abs/2604.23536)
   - **STG (Spatiotemporal Skip Guidance)** — Hyung et al., *Spatiotemporal Skip Guidance for Enhanced Video Diffusion Sampling*, CVPR 2025. [arXiv:2411.18664](https://arxiv.org/abs/2411.18664)
