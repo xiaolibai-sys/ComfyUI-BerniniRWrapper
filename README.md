@@ -162,8 +162,8 @@ ComfyUI-BerniniR uses the standard ComfyUI model folders.
 
 ### VAE
 
-- Wan 2.1 VAE: 16 latent channels (4× temporal, 8×8 spatial compression).
-- Wan 2.2 / WanI38B VAE with 48 latent channels is also supported internally.
+- Wan 2.1/2.2 VAE: 16 latent channels (4× temporal, 8×8 spatial compression).
+- WanI38B VAE with 48 latent channels is also supported internally.
 
 ---
 
