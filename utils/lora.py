@@ -136,6 +136,14 @@ def _standardize_key(k: str) -> str:
     if k.startswith("diffusion.model."):
         k = k.replace("diffusion.model.", "diffusion_model.", 1)
 
+    # ── Generic Kohya diffusers naming: lora_down/lora_up -> lora_A/lora_B ──
+    # This MUST come after all prefix conversions so that keys already under
+    # ``diffusion_model.blocks.N.<mod>.lora_down.weight`` are caught.
+    if k.endswith(".lora_down.weight"):
+        k = k[: -len(".lora_down.weight")] + ".lora_A.weight"
+    elif k.endswith(".lora_up.weight"):
+        k = k[: -len(".lora_up.weight")] + ".lora_B.weight"
+
     return k
 
 
@@ -196,7 +204,22 @@ def _convert_fun_lora_key(k: str) -> str:
     return new_key
 
 # ---------------------------------------------------------------------------
-# Inline LoRA merge (bypasses ComfyUI's load_lora_for_models)
+# Key prefix normalization (used by inline merge to align lora ↔ base keys)
+# ---------------------------------------------------------------------------
+
+def _normalize_unet_key(k: str) -> str:
+    """Strip common model-prefixes so lora keys match base state-dict keys.
+
+    Matches the streaming path's ``_normalize_unet_key`` in ``wan_model.py``.
+    """
+    for prefix in ("model.diffusion_model.", "diffusion_model.", "model.", "video_model."):
+        if k.startswith(prefix):
+            return k[len(prefix):]
+    return k
+
+
+# ---------------------------------------------------------------------------
+# Inline LoRA/DoRA merge (bypasses ComfyUI's load_lora_for_models)
 # ---------------------------------------------------------------------------
 
 def load_lora_state_dict(path: str) -> dict:
@@ -264,11 +287,18 @@ def merge_lora_into_state_dict(
     lora_sd: dict,
     strength: float = 1.0,
 ) -> dict:
-    """Fold a single LoRA directly into *base_sd* without using ComfyUI patches.
+    """Fold a single LoRA/DoRA directly into *base_sd* without using ComfyUI patches.
 
     For each LoRA key group ``diffusion_model.blocks.N.<module>.lora_{A,B}.weight``
     the delta is computed as ``scale * (B @ A)`` and added to the corresponding
-    base weight ``diffusion_model.blocks.N.<module>.weight``.
+    base weight.
+
+    **DoRA** (Weight-Decomposed Low-Rank Adaptation) support:
+
+    - ``.diff_b`` on 2-D (Linear) weights: DoRA magnitude delta.
+      ``W_final = (||W0|| + diff_b) * W_temp / ||W_temp||`` (row-wise).
+    - ``.diff_b`` on 1-D weights (LayerNorms that have ``.bias``): bias delta.
+    - ``.diff`` on 1-D (norm) weights: direct additive delta to norm weight.
 
     The optional ``.alpha`` scalar is used to compute ``scale = strength * alpha / rank``,
     matching ComfyUI's ``comfy.lora.calculate_weight`` behaviour.
@@ -294,7 +324,7 @@ def merge_lora_into_state_dict(
     if strength == 0.0:
         return base_sd
 
-    # Group A/B/alpha by the corresponding base weight key.
+    # Group A/B/alpha/diff_b/diff by the corresponding base weight key.
     groups: dict[str, dict[str, torch.Tensor]] = {}
     for k, v in lora_sd.items():
         if not isinstance(v, torch.Tensor):
@@ -308,12 +338,40 @@ def merge_lora_into_state_dict(
         elif k.endswith(".alpha"):
             base_key = k[: -len(".alpha")] + ".weight"
             groups.setdefault(base_key, {})["alpha"] = v
+        elif k.endswith(".diff_b"):
+            base_key = k[: -len(".diff_b")] + ".weight"
+            groups.setdefault(base_key, {})["diff_b"] = v
+        elif k.endswith(".diff"):  # DoRA magnitude for norm layers
+            base_key = k[: -len(".diff")] + ".weight"
+            groups.setdefault(base_key, {})["diff"] = v
 
-    for base_key, parts in groups.items():
+    for lora_base_key, parts in groups.items():
+        # Normalize the lora key prefix so it matches base_sd.
+        base_key = _normalize_unet_key(lora_base_key)
         A = parts.get("A")
         B = parts.get("B")
-        if A is None or B is None:
+        diff_b = parts.get("diff_b")
+        diff = parts.get("diff")
+        has_lora = (A is not None and B is not None)
+        has_do_dora = (diff_b is not None or diff is not None)
+
+        # Skip entirely if nothing to do for this key.
+        if not has_lora and not has_do_dora:
             continue
+
+        # ── Handle pure norm-diff / bias-diff (no A/B pair) ──────────────
+        if not has_lora and has_do_dora:
+            if base_key in base_sd and diff is not None and base_sd[base_key].dim() == 1:
+                base_sd[base_key] = base_sd[base_key].to(torch.float32) + diff.to(torch.float32)
+                logger.debug("[BerniniR] Norm diff applied: %s", base_key)
+            if diff_b is not None:
+                bias_key = base_key[: -len(".weight")] + ".bias"
+                if bias_key in base_sd:
+                    base_sd[bias_key] = base_sd[bias_key].to(torch.float32) + diff_b.to(torch.float32)
+                    logger.debug("[BerniniR] Bias diff applied: %s", bias_key)
+            continue
+
+        # ── Normal LoRA merge (A/B pair required) ────────────────────────
         if base_key not in base_sd:
             logger.warning(
                 "[BerniniR] LoRA base key not found in model state dict: %s",
@@ -336,8 +394,23 @@ def merge_lora_into_state_dict(
         else:
             base_f = base_weight.to(torch.float32)
 
+        # 1. LoRA delta
         delta, _ = _lora_delta(A, B, parts.get("alpha"), strength, base_weight.shape)
-        base_f = base_f + delta
+        w_temp = base_f + delta
+
+        # 2. DoRA for 2-D (Linear) weights
+        if diff_b is not None and base_weight.dim() == 2:
+            # W_final = (||W0|| + diff_b) * W_temp / ||W_temp||
+            init_norm = base_f.norm(dim=1, keepdim=True).clamp(min=1e-8)
+            temp_norm = w_temp.norm(dim=1, keepdim=True).clamp(min=1e-8)
+            m = init_norm + diff_b.to(torch.float32).reshape(-1, 1).clamp(min=0.0)
+            base_f = m * w_temp / temp_norm
+        else:
+            base_f = w_temp
+
+        # 3. Norm diff for 1-D weights
+        if diff is not None and base_weight.dim() == 1:
+            base_f = base_f + diff.to(torch.float32)
 
         if is_fp8:
             new_w, new_scale = _requantize_fp8(base_f)

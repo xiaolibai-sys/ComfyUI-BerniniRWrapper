@@ -497,6 +497,7 @@ class BerniniRWanModel(nn.Module):
                     prefetch_count=cfg.prefetch_count,
                     pin_memory=cfg.pin_memory,
                     block_reader=getattr(self, '_block_reader', None),
+                    lora_reader=getattr(self, '_lora_reader', None),
                 )
                 self._block_swap_mgr = _bswap
             kwargs.pop('_block_swap_mgr', None)
@@ -663,6 +664,7 @@ class BerniniRWanModel(nn.Module):
                         prefetch_count=cfg.prefetch_count,
                         pin_memory=cfg.pin_memory,
                         block_reader=getattr(self, '_block_reader', None),
+                        lora_reader=getattr(self, '_lora_reader', None),
                     )
                     self._block_swap_mgr = _bswap
 
@@ -1110,14 +1112,31 @@ def _build_streaming_lora_groups(lora_specs):
             elif k.endswith(".alpha"):
                 base = k[:-len(".alpha")] + ".weight"
                 per.setdefault(base, {})["alpha"] = v
+            elif k.endswith(".diff_b"):
+                base = k[:-len(".diff_b")] + ".weight"
+                per.setdefault(base, {})["diff_b"] = v
+            elif k.endswith(".diff"):
+                base = k[:-len(".diff")] + ".weight"
+                per.setdefault(base, {})["diff"] = v
         for base, parts in per.items():
             if "A" not in parts or "B" not in parts:
+                # Norm-only diffs / bias diffs (no A/B pair)
+                if parts.get("diff_b") is not None or parts.get("diff") is not None:
+                    norm_base = _normalize_unet_key(base)
+                    groups.setdefault(norm_base, []).append({
+                        "A": None, "B": None, "alpha": None,
+                        "diff_b": parts.get("diff_b"),
+                        "diff": parts.get("diff"),
+                        "strength": float(strength),
+                    })
                 continue
             norm_base = _normalize_unet_key(base)
             groups.setdefault(norm_base, []).append({
                 "A": parts["A"],
                 "B": parts["B"],
                 "alpha": parts.get("alpha"),
+                "diff_b": parts.get("diff_b"),
+                "diff": parts.get("diff"),
                 "strength": float(strength),
             })
         logger.info("[BerniniR] Inline merged LoRA: %s (strength=%.3f)",
@@ -1125,8 +1144,33 @@ def _build_streaming_lora_groups(lora_specs):
     return groups
 
 
+def _collect_block_lora(lora_groups: dict, bidx: int) -> dict | None:
+    """Return ``{pname: entries}`` for transformer block *bidx* and remove
+    those keys from *lora_groups*.
+
+    This co-locates a block's LoRA with the block itself (``block._lora_payload``)
+    and lets the global LoRA pool shrink toward empty as every block is attached —
+    the unified (block, lora) → (block) slot design needs no persistent pool.
+    """
+    if not lora_groups:
+        return None
+    prefix = f"blocks.{bidx}."
+    out = {}
+    to_pop = []
+    for key, val in lora_groups.items():
+        if key.startswith(prefix) and key.endswith(".weight"):
+            # Keep the full param name (incl. ".weight") so it matches the
+            # slot's ``named_parameters()`` key, e.g. "self_attn.q.weight".
+            pname = key[len(prefix):]
+            out[pname] = val
+            to_pop.append(key)
+    for k in to_pop:
+        del lora_groups[k]
+    return out or None
+
+
 def _apply_streaming_loras(base: torch.Tensor, groups: list, scale: torch.Tensor | None = None):
-    """Fold pre-grouped LoRAs into a single base weight tensor.
+    """Fold pre-grouped LoRAs/DoRAs into a single base weight tensor.
 
     ``scale`` is the ``weight_scale`` for fp8_scaled (quantized) weights.  When
     provided the base is dequantized (``stored * scale``), the LoRA deltas are
@@ -1134,10 +1178,27 @@ def _apply_streaming_loras(base: torch.Tensor, groups: list, scale: torch.Tensor
     together with a fresh ``scale`` (caller must update the group).  When
     ``scale`` is None the weight is plain bf16/fp16 and the original dtype is kept.
 
+    DoRA support (from ``diff_b`` / ``diff`` in the group dicts):
+      - ``diff_b`` on 2-D (Linear) weights: DoRA magnitude delta applied row-wise.
+      - ``diff``  on 1-D (norm) weights: direct additive delta to the norm weight.
+
     Returns ``(weight, scale_or_None)``.
     """
-    if not groups:
+    # Quick return if nothing to do: no groups, or groups with only A=None entries.
+    has_work = False
+    # Collect DoRA params from the group list (take last non-None values).
+    dora_diff_b = None
+    dora_diff = None
+    for g in groups:
+        if g.get("A") is not None and g.get("B") is not None:
+            has_work = True
+        if g.get("diff_b") is not None:
+            dora_diff_b = g["diff_b"]
+        if g.get("diff") is not None:
+            dora_diff = g["diff"]
+    if not has_work and dora_diff_b is None and dora_diff is None:
         return base, scale
+
     from ..utils.lora import _lora_delta, _requantize_fp8
 
     if scale is not None:
@@ -1147,9 +1208,34 @@ def _apply_streaming_loras(base: torch.Tensor, groups: list, scale: torch.Tensor
         base_f = base.to(torch.float32)
         is_fp8 = False
 
+    # Capture the ORIGINAL base row/vector norm BEFORE any LoRA delta is applied.
+    # DoRA needs the target norm = ||W0|| + diff_b, so we must snapshot ||W0|| now
+    # (after the delta loop base_f would already be W0 + Δ).
+    if base.dim() == 2:
+        init_norm = base_f.norm(dim=1, keepdim=True).clamp(min=1e-8)
+    else:
+        init_norm = None
+
+    # 1. Apply LoRA deltas
     for g in groups:
-        delta, _ = _lora_delta(g["A"], g["B"], g.get("alpha"), g["strength"], base.shape)
-        base_f = base_f + delta
+        if g.get("A") is not None and g.get("B") is not None:
+            delta, _ = _lora_delta(g["A"], g["B"], g.get("alpha"), g["strength"], base.shape)
+            base_f = base_f + delta
+
+    # 2. DoRA for 2-D (Linear) weights
+    #    W_final = (||W0|| + diff_b) * W_temp / ||W_temp||
+    #    where W_temp = W0 + Σ delta, and init_norm is ||W0|| captured above.
+    #    NOTE: diff_b is the magnitude *difference* (tiny, ~1e-4), NOT the target
+    #    magnitude.  Using m = diff_b alone (without ||W0||) zeroes the weight.
+    if dora_diff_b is not None and base.dim() == 2:
+        temp_norm = base_f.norm(dim=1, keepdim=True).clamp(min=1e-8)
+        m = (init_norm + dora_diff_b.to(torch.float32).reshape(-1, 1)).clamp(min=0.0)
+        base_f = m * base_f / temp_norm
+    else:
+        # Norm diff for 1-D weights (handled here only for the LoRA+diff case;
+        # pure norm-only groups are applied by _fold_group_loras).
+        if dora_diff is not None and base.dim() == 1:
+            base_f = base_f + dora_diff.to(torch.float32)
 
     if is_fp8:
         return _requantize_fp8(base_f)
@@ -1164,19 +1250,51 @@ def _fold_group_loras(sub_group: dict, prefix: str, lora_groups: dict | None):
     """
     if not lora_groups:
         return
+
+    def _cast_back(t: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+        # Norm weights/biases in this model are fp16 (not fp8), so a plain
+        # cast back to the original dtype is sufficient.  The fp8 branch is
+        # kept only for theoretical fp8-scaled norms.
+        if dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+            from ..utils.lora import _requantize_fp8
+            return _requantize_fp8(t.to(torch.float32))[0]
+        return t.to(dtype)
+
     for full_key, g_list in lora_groups.items():
         if not full_key.startswith(prefix):
             continue
         local = full_key[len(prefix):]  # e.g. "self_attn.q.weight"
         if local not in sub_group:
             continue
-        # sub_group keys keep the full tensor name (e.g. "self_attn.q.weight_scale"),
-        # so the scale key is local + "_scale" (local already ends in ".weight").
-        scale = sub_group.get(local + "_scale")
-        new_w, new_scale = _apply_streaming_loras(sub_group[local], g_list, scale)
-        sub_group[local] = new_w
-        if new_scale is not None:
-            sub_group[local + "_scale"] = new_scale
+        # Split into LoRA entries (have A & B) and norm-only entries (no A/B).
+        lora_entries = [g for g in g_list
+                        if g.get("A") is not None and g.get("B") is not None]
+        norm_only = [g for g in g_list
+                     if not (g.get("A") is not None and g.get("B") is not None)]
+
+        if lora_entries:
+            # sub_group keys keep the full tensor name (e.g. "self_attn.q.weight_scale"),
+            # so the scale key is local + "_scale" (local already ends in ".weight").
+            scale = sub_group.get(local + "_scale")
+            new_w, new_scale = _apply_streaming_loras(sub_group[local], lora_entries, scale)
+            sub_group[local] = new_w
+            if new_scale is not None:
+                sub_group[local + "_scale"] = new_scale
+
+        # Norm-only groups: mirror merge_lora_into_state_dict's pure
+        # norm-diff / bias-diff branch.  diff -> norm weight (1-D);
+        # diff_b -> corresponding bias (1-D).
+        for g in norm_only:
+            tgt = sub_group[local]
+            if g.get("diff") is not None and tgt.dim() == 1:
+                sub_group[local] = _cast_back(
+                    tgt.to(torch.float32) + g["diff"].to(torch.float32), tgt.dtype)
+            if g.get("diff_b") is not None:
+                bias_local = local[: -len(".weight")] + ".bias"
+                if bias_local in sub_group:
+                    bt = sub_group[bias_local]
+                    sub_group[bias_local] = _cast_back(
+                        bt.to(torch.float32) + g["diff_b"].to(torch.float32), bt.dtype)
 
 
 # ---------------------------------------------------------------------------
@@ -1367,9 +1485,22 @@ def _load_bernini_model_safetensors_streaming(
     if lazy and block_reader is not None:
         dm._block_reader = block_reader
 
-    # Pre-load LoRAs (small) so they can be folded block-by-block.
-    lora_groups = _build_streaming_lora_groups(lora_specs)
-    dm._lora_groups = lora_groups
+    # Pre-load / prepare LoRAs so they can be folded block-by-block.
+    # Resident mode: load all LoRA into a RAM dict (aligned with the model
+    # weights already in CPU RAM).  Lazy mode: build a LoraBlockReader that
+    # reads block LoRA from disk on demand — no RAM pool.  Non-block keys
+    # (patch_embedding, head, norms) are read at startup for both modes.
+    lora_groups: dict = {}
+    if lora_specs:
+        if lazy and block_swap:
+            from ..utils.block_reader import LoraBlockReader
+            dm._lora_reader = LoraBlockReader(lora_specs)
+            non_block_lora = dm._lora_reader.read_non_block()
+            if non_block_lora:
+                lora_groups = non_block_lora
+        else:
+            lora_groups = _build_streaming_lora_groups(lora_specs)
+            dm._lora_groups = lora_groups
 
     # Per-block metadata for block-swap VRAM estimates.
     block_plan: dict = {}
@@ -1401,10 +1532,16 @@ def _load_bernini_model_safetensors_streaming(
                             _record_block_meta(
                                 current_group, group, block_plan, block_bytes, block_mb)
                     else:
-                        _stream_load_group(dm, current_group, group, lora_groups)
+                        _stream_load_group(dm, current_group, group, None)
                         if block_swap:
                             _record_block_meta(
                                 current_group, group, block_plan, block_bytes, block_mb)
+                            # Co-locate this block's LoRA with its slot
+                            # (unified (block, lora) → (block) design).
+                            bidx = int(current_group.split('.')[1])
+                            blk = _collect_block_lora(lora_groups, bidx)
+                            if blk:
+                                dm.blocks[bidx]._lora_payload = blk
                 else:
                     _stream_load_group(dm, current_group, group, lora_groups)
                 group.clear()
@@ -1429,10 +1566,15 @@ def _load_bernini_model_safetensors_streaming(
                     if block_swap:
                         _record_block_meta(current_group, group, block_plan, block_bytes, block_mb)
                 else:
-                    _stream_load_group(dm, current_group, group, lora_groups)
+                    _stream_load_group(dm, current_group, group, None)
                     if block_swap:
                         _record_block_meta(
                             current_group, group, block_plan, block_bytes, block_mb)
+                        # Co-locate this block's LoRA with its slot.
+                        bidx = int(current_group.split('.')[1])
+                        blk = _collect_block_lora(lora_groups, bidx)
+                        if blk:
+                            dm.blocks[bidx]._lora_payload = blk
             else:
                 _stream_load_group(dm, current_group, group, lora_groups)
             group.clear()
@@ -1442,6 +1584,15 @@ def _load_bernini_model_safetensors_streaming(
             "[BerniniR] LoRA base key not found in model state dict: %s",
             missing_base,
         )
+
+    # The global LoRA pool is no longer needed in resident mode: every block's
+    # LoRA has been co-located into its slot (or already folded into non-block
+    # params, e.g. embeddings/norms), so dropping the pool frees the 1.5GB.
+    # Lazy mode never builds a RAM pool — LoraBlockReader reads per-block
+    # from disk on demand.
+    if not lazy and block_swap:
+        lora_groups.clear()
+        dm._lora_groups = None
 
     # In lazy mode, block weights are NOT loaded into CPU RAM yet.
     # BlockSwapManager's _DiskPrefetcher reads them from disk on demand
@@ -1453,7 +1604,6 @@ def _load_bernini_model_safetensors_streaming(
             # No pre-warm — BlockSwapManager loads first window on first
             # prepare(0) call via _DiskPrefetcher.
             dm._prewarmed = 0
-            dm._lora_groups = lora_groups
             logger.info("[BerniniR] Lazy mode: %d blocks, metadata only, no pre-warm",
                         num_layers)
         else:

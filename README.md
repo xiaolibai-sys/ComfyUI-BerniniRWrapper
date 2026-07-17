@@ -87,7 +87,7 @@ All visual inputs are encoded into `context_latents` and attached to the conditi
 - **Five attention backends** — auto-detect and switch between SageAttention 3, SageAttention, FlashAttention, xFormers, and SDPA.
 - **TeaCache acceleration** — skip transformer blocks when latent change between steps falls below a threshold.
 - **torch.compile support** — Windows-aware compile helper with SDK auto-detection and fallback handling.
-- **Block swap** — GPU↔CPU transformer-block swapping for reduced VRAM footprint.
+- **Block swap (ring buffer + SlotEntry)** — GPU↔CPU transformer-block swapping for reduced VRAM footprint. Uses a cursor-based ring buffer (no free-list) and `SlotEntry` to handle both regular and fp8-quantized weights transparently. Configurable loading mode: **Full** (pre-load all blocks into CPU home pool, no disk I/O during sampling) or **Streaming** (load blocks from disk on demand, lower peak RAM). An optional pinned-memory staging ring (PinStage) enables truly async H2D copies for prefetched blocks.
 - **In-context conditioning** — encode `source_video`, `reference_video`, or one/multiple `reference_images` into `context_latents`.
 - **NAG (Normalized Attention Guidance)** — inject negative-prompt attention paths to enhance detail.
 - **Prompt Embedding** — task-aware prompt planning with 12 presets and text-embedding disk cache.
@@ -213,7 +213,7 @@ All 19 nodes appear under the **Bernini-R** category in ComfyUI.
 | Node | Output | Description |
 |---|---|---|
 | `BerniniR Load LoRA` | `MODEL` | Append a LoRA spec (inline merge) to the model handle. |
-| `BerniniR Block Swap Args` | `BERNINI_BLOCKSWAP` | Configure GPU↔CPU transformer-block swapping. |
+| `BerniniR Block Swap Args` | `BERNINI_BLOCKSWAP` | Configure GPU↔CPU block swap with ring buffer, prefetch, pin memory, and loading mode (Full / Streaming). |
 
 ---
 
@@ -422,7 +422,9 @@ BerniniR Segment Schedule ──> positive ──┐
 2. Lower `context_frames` (e.g., 41 or 25).
 3. Increase `context_overlap` if you see seams.
 4. Use `uniform_standard` for quality or `static_standard` for speed.
-5. Optionally connect `BerniniR Block Swap Args` to offload transformer blocks to CPU.
+5. Optionally connect `BerniniR Block Swap Args` to offload transformer blocks to CPU:
+   - **Full** mode: all weights pre-loaded into CPU RAM at startup. Zero disk I/O during sampling, ~2× model size peak RAM.
+   - **Streaming** mode: blocks loaded from disk on demand. Lower peak RAM (~1.05×), may cause brief I/O latency when the window slides to a new block group.
 
 ### Speed up sampling
 
@@ -452,7 +454,7 @@ In `BerniniR Prompt Embedding`:
 
 - **Renderer-only**: This package uses **Bernini-R**, the renderer-only variant. It does not include the 7B MLLM semantic planner from the full Bernini pipeline, so complex instruction decomposition and chain-of-thought reasoning are not available.
 - **Model capacity**: The 1.3B checkpoint handles style transfer, watermark removal, local edits, and reference-guided edits. For complex human generation and multi-step reasoning, the 14B variant provides higher quality. Both are supported by this package.
-- **Private types**: `BERNINI_CTX`, `BERNINI_GUIDANCE`, `BERNINI_ATTN`, and `BERNINI_BLOCKSWAP` are custom socket types. Mixing these nodes with native ComfyUI samplers requires adapters.
+
 - **Windows torch.compile caveats**: `torch._dynamo.config.suppress_errors = True` is enabled, which hides compile failures and may silently fall back to eager mode.
 ---
 

@@ -285,17 +285,30 @@ class _TransferEngine:
         return idx
 
     def _ensure_entries(self, pool, built, idx, block, device) -> dict:
-        """Build a ``name → SlotEntry`` dict for *block* if not already done."""
+        """Build a ``name → SlotEntry`` dict for *block* if not already done.
+
+        On the first build, any LoRA payload co-located on the block
+        (``block._lora_payload``, set by the streaming/disk loader) is folded
+        into the slot and the payload is cleared — so the slot itself becomes
+        the single owner of that block's LoRA, and rebuilds never re-attach it.
+        """
         slot = pool[idx]
         if slot is not None and built[idx]:
             return slot
-        pool[idx] = {
+        entries = {
             n: SlotEntry.empty_like(
                 p, device=device,
                 pin_memory=(device == "cpu" and self.pin_memory),
             )
             for n, p in block.named_parameters()
         }
+        payload = getattr(block, "_lora_payload", None)
+        if payload:
+            for pname, lora_list in payload.items():
+                if pname in entries:
+                    entries[pname].lora = lora_list
+            block._lora_payload = None  # consumed into the slot
+        pool[idx] = entries
         built[idx] = True
         return pool[idx]
 
@@ -472,6 +485,16 @@ class _TransferEngine:
         for n in gpu:
             gpu[n].assign_to(block, n)
 
+        # Carry the co-located LoRA payload along with the block weights
+        # (unified slot: home and GPU copies both hold it until folded).
+        hslot = self._block_home.get(block_idx)
+        if hslot is not None:
+            home_entries = self._home_pool[hslot]
+            for n in gpu:
+                he = home_entries.get(n)
+                if he is not None and he.lora:
+                    gpu[n].lora = he.lora
+
         # Recycle home slot
         hslot = self._block_home.pop(block_idx, None)
         if hslot is not None:
@@ -522,6 +545,7 @@ class _TransferEngine:
                 he.scale.copy_(ge.scale)
             else:
                 he.data.copy_(ge.data)
+            he.lora = ge.lora  # carry co-located LoRA (None once folded)
             he.assign_to(block, n)
         self._block_home[block_idx] = hslot
         return True
@@ -641,12 +665,13 @@ class _DiskPrefetcher:
         self,
         model,
         block_reader,
+        lora_reader=None,
         max_workers: int = 2,
     ):
         self._model = model
         self._blocks = model.blocks
         self._reader = block_reader
-        self._lora_groups = getattr(model, "_lora_groups", None)
+        self._lora_reader = lora_reader
 
         self._executor = ThreadPoolExecutor(
             max_workers=max_workers,
@@ -790,9 +815,37 @@ class _DiskPrefetcher:
                 "[DiskPrefetch] Failed to read block %d: %s", req.block_idx, e
             )
             raise
+        # Fused LoRA approach: skip fold at disk-load time;
+        # BlockSwapManager folds LoRA after the block lands on the GPU ring
+        # buffer.  Co-locate this block's LoRA with its slot so the unified
+        # (block, lora) → (block) merge happens on the GPU ring, and the
+        # global LoRA pool can be dropped once every block has been attached.
         _stream_load_group(
-            self._model, req.group_key, tensors, self._lora_groups
+            self._model, req.group_key, tensors, None
         )
+        self._attach_block_lora(req.block_idx)
+
+    def _attach_block_lora(self, block_idx: int) -> None:
+        """Co-locate *block_idx*'s LoRA into ``block._lora_payload``.
+
+        Reads the block's LoRA on demand from the ``LoraBlockReader`` (lazy
+        mode) so the global LoRA RAM pool is never built.  The payload is
+        consumed once by ``_TransferEngine._ensure_entries`` when the slot is
+        first built.
+        """
+        reader = self._lora_reader
+        if reader is None:
+            return
+        try:
+            payload = reader.read_block_lora(block_idx)
+        except Exception:
+            logger.error("[DiskPrefetch] Failed to read LoRA for block %d", block_idx)
+            raise
+        if payload:
+            try:
+                self._blocks[block_idx]._lora_payload = payload
+            except IndexError:
+                pass
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -846,9 +899,11 @@ class RamHome(BlockHome):
 class DiskHome(BlockHome):
     """Lazy mode: weights are streamed from safetensors on demand."""
 
-    def __init__(self, model, block_reader, max_workers: int = 4):
+    def __init__(self, model, block_reader, lora_reader=None, max_workers: int = 4):
         self._model = model
-        self._disk = _DiskPrefetcher(model, block_reader, max_workers)
+        self._disk = _DiskPrefetcher(
+            model, block_reader, lora_reader=lora_reader, max_workers=max_workers,
+        )
 
     def read_into(self, block_idx: int, slot: dict, block) -> None:
         # *block* is the manager's model block (identical object to
@@ -929,6 +984,7 @@ class BlockSwapManager:
         prefetch_count: int = 1,
         pin_memory: bool = True,
         block_reader=None,
+        lora_reader=None,
         max_disk_workers: int = 4,
     ):
         self.model = model
@@ -946,7 +1002,10 @@ class BlockSwapManager:
         # Unified weight source: RamHome (resident RAM) or DiskHome (lazy
         # disk).  The swap engine never branches on mode afterwards.
         if block_reader is not None:
-            self._home: BlockHome = DiskHome(model, block_reader, max_disk_workers)
+            self._home: BlockHome = DiskHome(
+                model, block_reader, lora_reader=lora_reader,
+                max_workers=max_disk_workers,
+            )
             self._lazy = True
         else:
             self._home: BlockHome = RamHome(model)
@@ -1053,6 +1112,18 @@ class BlockSwapManager:
         # parameter set (fp8 deferred-weight layers are only registered after
         # ``load_state_dict`` runs inside ``ensure_ram``).
 
+        # ── Fold LoRA on GPU ring ─────────────────────────────────────
+        # All folding happens on the GPU ring (in-place), never on the CPU
+        # home pool.  Prewarmed blocks fold here; blocks loaded later fold in
+        # prepare() right after load_block.  "Folded or not" is inferred from
+        # whether each slot still carries its co-located LoRA (see
+        # _slot_has_lora) — no external _lora_folded set is needed, so a slot
+        # that was offloaded (and wrote its merged weights home) is simply
+        # skipped on re-load.
+        for bidx in list(self._xfer._block_gpu):
+            if self._slot_has_lora(bidx):
+                self._fold_lora_on_gpu(bidx)
+
     # ------------------------------------------------------------------
     # Public API — called from the model's forward pass
     # ------------------------------------------------------------------
@@ -1101,6 +1172,13 @@ class BlockSwapManager:
                     self._xfer.load_block(j, self._blocks[j], non_blocking=True)
                     self._xfer.sync_prefetch(j)  # wait for async H2D
                 self._window.mark_loaded(j)
+                # Fold on GPU ring right after the block lands there (works for
+                # both RamHome and lazy DiskHome; prefetched blocks land on GPU
+                # via start_prefetch and are folded here too).  _slot_has_lora
+                # skips a block whose slot already holds merged weights (from a
+                # previous offload), so re-folding never happens.
+                if self._slot_has_lora(j):
+                    self._fold_lora_on_gpu(j)
             if k < len(to_offload):
                 i = to_offload[k]
                 if self._xfer.offload_block(i, self._blocks[i]):
@@ -1114,6 +1192,8 @@ class BlockSwapManager:
                     self._xfer.load_block(j, self._blocks[j], non_blocking=True)
                     self._xfer.sync_prefetch(j)
                 self._window.mark_loaded(j)
+                if self._slot_has_lora(j):
+                    self._fold_lora_on_gpu(j)
 
         if did_offload:
             self._budget.maybe_flush(self._xfer.device, reserve_blocks=2)
@@ -1246,4 +1326,107 @@ class BlockSwapManager:
         avail_mb = max(0.0, free_mb - reserve_mb)
         max_by_mem = int(avail_mb / (self._budget.block_mb * 1.2))
         return max(0, min(self._xfer.prefetch_count, max_by_mem))
+
+    # ── GPU LoRA folding (fused into ring-buffer load) ──────────────
+
+    def _fold_lora_on_entries(self, entries: dict, block_idx: int) -> None:
+        """Fold any LoRA co-located in *entries* into the block weights in-place.
+
+        Reads ``slot.lora`` (set when the slot was materialised from the
+        block's ``_lora_payload``) instead of any global map.  After folding,
+        ``slot.lora`` is set to ``None`` — the slot becomes a pure ``(block)``
+        and re-loads skip folding automatically.  "Folded or not" is therefore
+        inferred from the slot contents; no external bookkeeping set is needed.
+        """
+        from ..utils.lora import _lora_delta, _requantize_fp8
+        from torch import float32 as _f32
+
+        for param_name, slot in entries.items():
+            lora_entries = slot.lora
+            if not lora_entries:
+                continue
+
+            # Work on the SAME device as the slot (GPU ring or CPU home),
+            # so LoRA tensors are moved there too — never to a mismatched device.
+            work_device = slot.data.device
+
+            if slot.is_qt:
+                base_f = slot.data.to(_f32) * slot.scale.to(_f32)
+                is_fp8 = True
+            else:
+                base_f = slot.data.to(_f32)
+                is_fp8 = False
+
+            has_lora = any(e.get("A") is not None and e.get("B") is not None
+                           for e in lora_entries)
+            has_dora = any(e.get("diff_b") is not None for e in lora_entries) or \
+                       any(e.get("diff") is not None for e in lora_entries)
+
+            if not has_lora and not has_dora:
+                slot.lora = None
+                continue
+
+            if has_dora and base_f.dim() == 2:
+                init_norm = base_f.norm(dim=1, keepdim=True).clamp(min=1e-8)
+            else:
+                init_norm = None
+
+            if has_lora:
+                for entry in lora_entries:
+                    A, B = entry.get("A"), entry.get("B")
+                    if A is None or B is None:
+                        continue
+                    A_gpu = A.to(device=work_device, dtype=_f32, non_blocking=False)
+                    B_gpu = B.to(device=work_device, dtype=_f32, non_blocking=False)
+                    delta, _ = _lora_delta(
+                        A_gpu, B_gpu,
+                        entry.get("alpha"), entry.get("strength", 1.0),
+                        base_f.shape,
+                    )
+                    base_f = base_f + delta
+
+            diff_b = None
+            diff = None
+            for entry in lora_entries:
+                if entry.get("diff_b") is not None:
+                    diff_b = entry["diff_b"]
+                if entry.get("diff") is not None:
+                    diff = entry["diff"]
+
+            if diff_b is not None and base_f.dim() == 2:
+                temp_norm = base_f.norm(dim=1, keepdim=True).clamp(min=1e-8)
+                diff_gpu = diff_b.to(device=work_device, dtype=_f32).reshape(-1, 1)
+                m = (init_norm + diff_gpu).clamp(min=0.0)
+                base_f = m * base_f / temp_norm
+            elif diff is not None and base_f.dim() == 1:
+                base_f = base_f + diff.to(device=work_device, dtype=_f32)
+
+            if is_fp8:
+                new_data, new_scale = _requantize_fp8(base_f)
+                slot.data.copy_(new_data)
+                slot.scale.copy_(new_scale)
+            else:
+                slot.data.copy_(base_f.to(slot.data.dtype))
+
+            # Consume: slot is now pure (block); re-loads skip folding.
+            slot.lora = None
+
+    def _fold_lora_on_gpu(self, block_idx: int) -> None:
+        """Fold LoRA for *block_idx* on its GPU ring slot in-place (if present)."""
+        gslot = self._xfer._block_gpu.get(block_idx)
+        if gslot is None:
+            return
+        self._fold_lora_on_entries(self._xfer._gpu_pool[gslot], block_idx)
+
+    def _slot_has_lora(self, block_idx: int) -> bool:
+        """Whether *block_idx*'s GPU ring slot still carries unfused LoRA.
+
+        Used to decide whether to fold on load — replaces the old
+        ``_lora_folded`` bookkeeping set: a slot that has no LoRA is already
+        merged, so re-loads are skipped automatically.
+        """
+        gslot = self._xfer._block_gpu.get(block_idx)
+        if gslot is None:
+            return False
+        return any(e.lora for e in self._xfer._gpu_pool[gslot].values())
 

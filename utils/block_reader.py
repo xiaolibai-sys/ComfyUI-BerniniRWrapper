@@ -22,6 +22,9 @@ from typing import Optional
 
 import torch
 
+# Shared typed payloads
+from .types import LoraTensorEntry
+
 logger = logging.getLogger(__name__)
 
 
@@ -86,6 +89,21 @@ _SAFETENSORS_DTYPE_MAP: dict[str, torch.dtype] = {
 # Typed block-group plan: which safetensors keys belong to which block.
 TypedBlockPlan = dict[int, dict[str, int]]
 TypedBlockMeta = dict[str, object]
+
+
+# ── Common utility: normalise safetensors key ──────────────────────────
+
+
+def _normalize_unet_key(key: str) -> str:
+    """Strip standard model prefixes, matching wan_model._normalize_unet_key."""
+    k = key
+    for prefix in (
+        "model.diffusion_model.", "diffusion_model.", "model.", "video_model.",
+    ):
+        if k.startswith(prefix):
+            k = k[len(prefix):]
+            break
+    return k
 
 
 class RandomAccessBlockReader:
@@ -270,27 +288,233 @@ class RandomAccessBlockReader:
     def _normalize_key(key: str) -> str:
         """Canonicalise a safetensors key to model state-dict form.
 
-        Only the checkpoint prefix (``model.diffusion_model.`` /
-        ``diffusion_model.`` / ``model.``) is stripped.  The ``.weight`` /
-        ``.bias`` / ``.weight_scale`` / ``.comfy_quant`` tensor suffix is
-        KEPT, so the returned key matches the keys produced by
-        ``_normalize_unet_key`` (the streaming loader) and ComfyUI's
-        ``load_state_dict`` path.
-
-        Dropping the suffix here was a bug: every tensor under a layer
-        (``self_attn.q.weight``, ``.weight_scale``, ``.bias``,
-        ``.comfy_quant``) collapsed to the same canonical ``self_attn.q``,
-        so the block plan map overwrote itself and ``read_block`` handed
-        ``_stream_load_group`` a single bogus key.  ComfyUI's
-        ``_load_quantized_module`` then could not find ``self_attn.q.weight``
-        and left the layer's ``weight`` as ``None`` -> "'NoneType' object has
-        no attribute 'device'" at forward time.
+        Delegates to the module-level ``_normalize_unet_key`` shared
+        with ``LoraBlockReader`` and ``wan_model._normalize_unet_key``.
         """
-        k = key
-        for prefix in (
-            "model.diffusion_model.", "diffusion_model.", "model.",
-        ):
-            if k.startswith(prefix):
-                k = k[len(prefix):]
-                break
-        return k
+        return _normalize_unet_key(key)
+
+
+# ── LoraBlockReader — on-demand per-block LoRA reader ───────────────────
+
+
+class LoraBlockReader:
+    """Per-block on-demand LoRA reader using random-access positioned reads.
+
+    Opens each LoRA safetensors file once and builds an offset plan (no
+    materialised tensors).  ``read_block_lora(idx)`` reads raw tensors from
+    disk and groups them into the same format expected by the unified slot
+    (``block._lora_payload``), matching the output of
+    ``_build_streaming_lora_groups`` for a single block.
+
+    Non-block LoRA entries (patch_embedding, head, norms, etc.) are
+    collected by ``read_non_block()`` which materialises them at startup —
+    these are few (typically < 10) and are needed during peripheral loading.
+
+    Thread safety: reads use ``_pread`` (position-independent), so multiple
+    ``read_block_lora`` calls can run concurrently on different block indices
+    with no locking.  However the object itself is intended for single-thread
+    usage in the lazy-mode disk prefetcher which already serialises by block.
+    """
+
+    # Suffixes and their kind labels.  Covers both Diffusers (lora_A/lora_B)
+    # and Kohya (lora_down/lora_up) naming — same kind value, so the fold
+    # math is identical.  Also handles DoRA (diff_b/diff) and alpha.
+    _LORA_SUFFIXES = {
+        ".lora_A.weight": "A",
+        ".lora_B.weight": "B",
+        ".lora_down.weight": "A",
+        ".lora_up.weight": "B",
+        ".alpha": "alpha",
+        ".diff_b": "diff_b",
+        ".diff": "diff",
+    }
+
+    def __init__(self, lora_specs: list[tuple[str, float]]):
+        # -- first pass: deduplicate paths, open files, read headers --
+        self._fds: list[int] = []
+        self._path_fd_idx: dict[str, int] = {}
+        self._path_headers: dict[str, tuple[dict, int]] = {}
+
+        for path, strength in lora_specs:
+            if strength == 0.0:
+                continue
+            if path not in self._path_headers:
+                fd = os.open(path, os.O_RDONLY | os.O_BINARY)
+                fd_idx = len(self._fds)
+                self._fds.append(fd)
+                self._path_fd_idx[path] = fd_idx
+                hdr_len = struct.unpack("<Q", os.read(fd, 8))[0]
+                header = json.loads(os.read(fd, hdr_len))
+                self._path_headers[path] = (header, 8 + hdr_len)
+
+        # -- second pass: build offset plan from headers --
+        self._spec_strengths: list[float] = []
+        self._plan: dict[int, dict[str, list[LoraTensorEntry]]] = {}
+        self._non_block_plan: dict[str, list[LoraTensorEntry]] = {}
+
+        valid_spec_idx = 0
+        for path, strength in lora_specs:
+            if strength == 0.0:
+                continue
+            header, data_offset = self._path_headers[path]
+            fd_idx = self._path_fd_idx[path]
+            self._spec_strengths.append(strength)
+
+            for raw_key, info in header.items():
+                if not isinstance(info, dict) or "dtype" not in info:
+                    continue
+                normalized = _normalize_unet_key(raw_key)
+                kind = self._identify_lora_kind(normalized)
+                if kind is None:
+                    continue
+                base_key = self._strip_lora_suffix(normalized) + ".weight"
+
+                entry = LoraTensorEntry(
+                    fd_idx=fd_idx,
+                    offset=data_offset + info["data_offsets"][0],
+                    length=info["data_offsets"][1] - info["data_offsets"][0],
+                    dtype=_SAFETENSORS_DTYPE_MAP.get(info["dtype"], torch.float32),
+                    shape=tuple(info["shape"]),
+                    kind=kind,
+                    spec_idx=valid_spec_idx,
+                )
+
+                parts = base_key.split('.')
+                if len(parts) >= 2 and parts[0] == 'blocks' and parts[1].isdigit():
+                    bidx = int(parts[1])
+                    pname = '.'.join(parts[2:])  # e.g. "self_attn.q.weight"
+                    self._plan.setdefault(bidx, {}).setdefault(pname, []).append(entry)
+                else:
+                    self._non_block_plan.setdefault(base_key, []).append(entry)
+
+            valid_spec_idx += 1
+
+        logger.info(
+            "[LoraReader] %d fd(s), %d valid spec(s), %d block(s) planned, "
+            "%d non-block entry group(s)",
+            len(self._fds), valid_spec_idx, len(self._plan), len(self._non_block_plan),
+        )
+
+    # ── Public API ──────────────────────────────────────────────────────
+
+    def read_block_lora(self, block_idx: int) -> dict[str, list[dict]] | None:
+        """Read and group LoRA tensors for *block_idx* from disk on demand.
+
+        Returns ``{pname: [entry_per_spec, ...]}`` — the same format as
+        ``_build_streaming_lora_groups`` for one block — or ``None`` when
+        *block_idx* has no LoRA entries.  Each per-spec entry is a dict
+        with keys ``A``, ``B``, ``alpha``, ``diff_b``, ``diff`` (may be
+        ``None``) and ``strength``.
+        """
+        block_entries = self._plan.get(block_idx)
+        if not block_entries:
+            return None
+
+        result: dict[str, list[dict]] = {}
+        for pname, raw_entries in block_entries.items():
+            by_spec: dict[int, dict[str, LoraTensorEntry]] = {}
+            for e in raw_entries:
+                by_spec.setdefault(e.spec_idx, {})[e.kind] = e
+
+            spec_entries: list[dict] = []
+            for sidx in sorted(by_spec):
+                kinds = by_spec[sidx]
+                entry: dict = {
+                    "A": None, "B": None,
+                    "alpha": None, "diff_b": None, "diff": None,
+                    "strength": self._spec_strengths[sidx],
+                }
+                for k in ("A", "B", "alpha", "diff_b", "diff"):
+                    if k in kinds:
+                        entry[k] = self._read_tensor(kinds[k])
+                spec_entries.append(entry)
+            result[pname] = spec_entries
+
+        return result
+
+    def read_non_block(self) -> dict[str, list[dict]]:
+        """Read and group ALL non-block LoRA entries at startup.
+
+        Returns the same format as ``_build_streaming_lora_groups`` but only
+        for keys that are NOT under any ``blocks.N.`` prefix
+        (e.g. ``patch_embedding.weight``, ``head.weight``).  Typically called
+        once, right after construction, to feed into the peripheral parameter
+        merge path.
+        """
+        return self._group_and_materialise(self._non_block_plan)
+
+    def close(self) -> None:
+        for fd in self._fds:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
+        return False
+
+    # ── Internal ────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _identify_lora_kind(normalized_key: str) -> str | None:
+        """Return the LoRA kind ('A', 'B', 'alpha', 'diff_b', 'diff') or None."""
+        for suffix, kind in LoraBlockReader._LORA_SUFFIXES.items():
+            if normalized_key.endswith(suffix):
+                return kind
+        return None
+
+    @staticmethod
+    def _strip_lora_suffix(normalized_key: str) -> str:
+        """Strip the LoRA suffix from a normalized key, returning the base.
+
+        E.g. ``blocks.0.self_attn.q.lora_A.weight`` → ``blocks.0.self_attn.q``.
+        """
+        for suffix in LoraBlockReader._LORA_SUFFIXES:
+            if normalized_key.endswith(suffix):
+                return normalized_key[:-len(suffix)]
+        return normalized_key
+
+    def _read_tensor(self, entry: LoraTensorEntry) -> torch.Tensor:
+        """Read a single tensor from disk using the entry's metadata."""
+        fd = self._fds[entry.fd_idx]
+        length = entry.length
+        data = bytearray(length)
+        view = memoryview(data)
+        offset = entry.offset
+        pos = 0
+        while pos < length:
+            chunk = _pread(fd, min(length - pos, 64 * 1024 * 1024), offset + pos)
+            if not chunk:
+                raise EOFError(f"Unexpected EOF at offset {offset + pos}")
+            view[pos:pos + len(chunk)] = chunk
+            pos += len(chunk)
+        return torch.frombuffer(data, dtype=entry.dtype).reshape(entry.shape)
+
+    def _group_and_materialise(
+        self, plan: dict[str, list[LoraTensorEntry]],
+    ) -> dict[str, list[dict]]:
+        """Read & group entries from *plan* into per-spec entry dicts."""
+        result: dict[str, list[dict]] = {}
+        for base_key, raw_entries in plan.items():
+            by_spec: dict[int, dict[str, LoraTensorEntry]] = {}
+            for e in raw_entries:
+                by_spec.setdefault(e.spec_idx, {})[e.kind] = e
+
+            spec_entries: list[dict] = []
+            for sidx in sorted(by_spec):
+                kinds = by_spec[sidx]
+                entry: dict = {
+                    "A": None, "B": None,
+                    "alpha": None, "diff_b": None, "diff": None,
+                    "strength": self._spec_strengths[sidx],
+                }
+                for k in ("A", "B", "alpha", "diff_b", "diff"):
+                    if k in kinds:
+                        entry[k] = self._read_tensor(kinds[k])
+                spec_entries.append(entry)
+            result[base_key] = spec_entries
+        return result

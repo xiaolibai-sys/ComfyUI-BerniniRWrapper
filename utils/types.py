@@ -156,19 +156,26 @@ class SlotEntry:
     """
 
     __slots__ = ('is_qt', 'data', 'scale', 'layout_cls', 'orig_dtype',
-                 'orig_shape')
+                 'orig_shape', 'lora')
 
     def __init__(self, *, data: torch.Tensor,
                  scale: torch.Tensor | None = None,
                  layout_cls: str = '',
                  orig_dtype: torch.dtype | None = None,
-                 orig_shape: tuple[int, ...] | None = None):
+                 orig_shape: tuple[int, ...] | None = None,
+                 lora: list | None = None):
         self.is_qt = scale is not None
         self.data = data
         self.scale = scale
         self.layout_cls = layout_cls
         self.orig_dtype = orig_dtype
         self.orig_shape = orig_shape
+        # Co-located LoRA payload (list of entry dicts), or None when the
+        # block weights in this slot are already merged.  The unified slot is
+        # ``(block, lora)`` before folding and ``(block)`` after — "folded"
+        # is inferred from whether ``lora`` is still present, so no external
+        # bookkeeping set is needed.
+        self.lora = lora
 
     @classmethod
     def empty_like(cls, param: nn.Parameter, device, pin_memory: bool = False):
@@ -251,6 +258,26 @@ class SlotEntry:
             sub._parameters[pn] = nn.Parameter(qt, requires_grad=False)
         else:
             sub._parameters[pn].data = self.data
+
+
+# ── LoraTensorEntry: typed metadata for a LoRA tensor in an offset plan ─────
+
+
+@dataclass
+class LoraTensorEntry:
+    """Metadata for one LoRA tensor in an offset plan (no materialised tensor).
+
+    ``kind`` is one of ``"A"``, ``"B"``, ``"alpha"``, ``"diff_b"``,
+    ``"diff"``.  ``spec_idx`` is the index into the owning
+    ``LoraBlockReader._spec_strengths`` list.
+    """
+    fd_idx: int
+    offset: int
+    length: int
+    dtype: torch.dtype
+    shape: tuple[int, ...]
+    kind: str
+    spec_idx: int
 
 
 @dataclass(frozen=True)
