@@ -360,12 +360,18 @@ class LoraBlockReader:
             fd_idx = self._path_fd_idx[path]
             self._spec_strengths.append(strength)
 
+            unknown_count = 0
+            unknown_examples: list[str] = []
+
             for raw_key, info in header.items():
                 if not isinstance(info, dict) or "dtype" not in info:
-                    continue
+                    continue  # metadata-only keys (__metadata__, etc.)
                 normalized = _normalize_unet_key(raw_key)
                 kind = self._identify_lora_kind(normalized)
                 if kind is None:
+                    unknown_count += 1
+                    if len(unknown_examples) < 3:
+                        unknown_examples.append(raw_key[-60:])
                     continue
                 base_key = self._strip_lora_suffix(normalized) + ".weight"
 
@@ -386,6 +392,13 @@ class LoraBlockReader:
                     self._plan.setdefault(bidx, {}).setdefault(pname, []).append(entry)
                 else:
                     self._non_block_plan.setdefault(base_key, []).append(entry)
+
+            if unknown_count > 0:
+                logger.warning(
+                    "[LoraReader] %s: %d tensor(s) with unrecognised suffix "
+                    "(silently skipped).  Examples: %s",
+                    os.path.basename(path), unknown_count, unknown_examples,
+                )
 
             valid_spec_idx += 1
 
