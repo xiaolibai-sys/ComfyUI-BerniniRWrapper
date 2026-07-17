@@ -1525,7 +1525,7 @@
       ],
       "size": [
         277.46875,
-        192
+        224
       ],
       "flags": {},
       "order": 14,
@@ -1545,9 +1545,10 @@
       },
       "widgets_values": [
         20,
-        false,
-        1,
-        false
+        true,
+        3,
+        true,
+        "Streaming"
       ]
     },
     {
@@ -1810,13 +1811,13 @@
         4,
         116631294408955,
         "randomize",
-        8,
+        6,
         1,
         "euler",
         "simple",
         1,
         3,
-        "CFG"
+        true
       ]
     },
     {
@@ -1863,8 +1864,8 @@
       "id": 45,
       "type": "BerniniR_ContextWindow",
       "pos": [
-        6356.170945420708,
-        5631.097254151593
+        6360,
+        5680
       ],
       "size": [
         274.65625,
@@ -2262,13 +2263,13 @@
   "config": {},
   "extra": {
     "ds": {
-      "scale": 0.6664535864182367,
+      "scale": 0.9864192361590113,
       "offset": [
-        -3800.7697881200093,
-        -4322.820746442019
+        -5371.496873661335,
+        -4926.368560801878
       ]
     },
-    "frontendVersion": "1.45.20",
+    "frontendVersion": "1.45.21",
     "VHS_latentpreview": false,
     "VHS_latentpreviewrate": 0,
     "VHS_MetadataImage": true,

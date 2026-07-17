@@ -24,6 +24,14 @@ class BerniniR_BlockSwapArgs:
 
     ``pin_memory`` pins the CPU copies of offloaded blocks.  This makes
     async transfers truly non-blocking, but increases host RAM usage.
+
+    ``loading_mode`` controls how block weights are loaded:
+
+    - ``Streaming`` (default): blocks are loaded from disk on demand.
+      Lower RAM usage, but may cause brief disk I/O during sampling.
+    - ``Full``: all block weights are loaded into CPU RAM at startup
+      before sampling begins.  Higher RAM usage, no disk I/O during
+      sampling.
     """
 
     @classmethod
@@ -54,6 +62,10 @@ class BerniniR_BlockSwapArgs:
                     "default": False,
                     "tooltip": "Pin CPU copies for faster async transfer. Increases host RAM.",
                 }),
+                "loading_mode": (["Streaming", "Full"], {
+                    "default": "Streaming",
+                    "tooltip": "Streaming: load blocks on demand (low RAM). Full: load all at startup (no disk I/O).",
+                }),
             },
         }
 
@@ -72,10 +84,12 @@ class BerniniR_BlockSwapArgs:
         prefetch: bool = True,
         prefetch_count: int = 1,
         pin_memory: bool = False,
+        loading_mode: str = "Streaming",
     ):
         return (BerniniBlockSwap(
             block_to_swap=block_to_swap,
             prefetch=prefetch,
             prefetch_count=prefetch_count,
             pin_memory=pin_memory,
+            loading_mode=loading_mode,
         ),)

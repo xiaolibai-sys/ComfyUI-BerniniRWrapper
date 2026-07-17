@@ -482,18 +482,20 @@ class BerniniRWanModel(nn.Module):
 
         # ── Block swap: create manager early so pre_forward can use it ──
         _bswap = None
-        if transformer_options.get("_block_swap", False):
+        cfg: Any = getattr(self, '_block_swap_config', None)
+        if cfg is not None and cfg.block_to_swap > 0:
             from ..utils.block_swap import BlockSwapManager
-            bswap_args = transformer_options.get("_block_swap_args", {})
-            window = bswap_args.get("window_size", 10)
+            total = len(self.blocks) if hasattr(self, 'blocks') else 0
+            window = max(1, total - cfg.block_to_swap)
             _bswap = getattr(self, '_block_swap_mgr', None)
             if _bswap is None or _bswap.window != window:
                 _bswap = BlockSwapManager(
                     self,
                     window_size=window,
-                    prefetch=bswap_args.get("prefetch", True),
-                    prefetch_count=bswap_args.get("prefetch_count", 1),
-                    pin_memory=bswap_args.get("pin_memory", False),
+                    prefetch=cfg.prefetch,
+                    prefetch_count=cfg.prefetch_count,
+                    pin_memory=cfg.pin_memory,
+                    block_reader=getattr(self, '_block_reader', None),
                 )
                 self._block_swap_mgr = _bswap
             kwargs.pop('_block_swap_mgr', None)
@@ -646,18 +648,20 @@ class BerniniRWanModel(nn.Module):
 
         # ── Block swap: GPU↔RAM offloading ───────────────────────────
         _bswap = kwargs.get("_block_swap_mgr")
-        if _bswap is None and transformer_options.get("_block_swap", False):
+        cfg: Any = getattr(self, '_block_swap_config', None)
+        if _bswap is None and cfg is not None and cfg.block_to_swap > 0:
             from ..utils.block_swap import BlockSwapManager
-            bswap_args = transformer_options.get("_block_swap_args", {})
-            window = bswap_args.get("window_size", 10)
+            total = len(self.blocks) if hasattr(self, 'blocks') else 0
+            window = max(1, total - cfg.block_to_swap)
             _bswap = getattr(self, '_block_swap_mgr', None)
             if _bswap is None or _bswap.window != window:
                 _bswap = BlockSwapManager(
                     self,
                     window_size=window,
-                    prefetch=bswap_args.get("prefetch", True),
-                    prefetch_count=bswap_args.get("prefetch_count", 1),
-                    pin_memory=bswap_args.get("pin_memory", False),
+                    prefetch=cfg.prefetch,
+                    prefetch_count=cfg.prefetch_count,
+                    pin_memory=cfg.pin_memory,
+                    block_reader=getattr(self, '_block_reader', None),
                 )
                 self._block_swap_mgr = _bswap
 
@@ -1045,6 +1049,23 @@ class _SafetensorsFileReader:
             read += n
         return torch.frombuffer(buffer, dtype=dtype).reshape(shape).clone()
 
+    def tensor_meta(self, key: str):
+        """Return ``(nbytes, numel)`` for *key* from the header only.
+
+        Reads nothing from the tensor data region — the byte count comes
+        straight from the safetensors ``data_offsets`` and the element
+        count from ``shape``.  Used by the lazy block-swap loader so it can
+        record per-block VRAM/byte estimates without pulling the whole
+        (~28 GB for 14B) checkpoint through host RAM just to count bytes.
+        """
+        info = self._header[key]
+        start, end = info["data_offsets"]
+        nbytes = end - start
+        numel = 1
+        for s in info["shape"]:
+            numel *= s
+        return nbytes, numel
+
     def __enter__(self):
         return self
 
@@ -1145,16 +1166,128 @@ def _fold_group_loras(sub_group: dict, prefix: str, lora_groups: dict | None):
     for full_key, g_list in lora_groups.items():
         if not full_key.startswith(prefix):
             continue
-        local = full_key[len(prefix):]
+        local = full_key[len(prefix):]  # e.g. "self_attn.q.weight"
         if local not in sub_group:
             continue
-        scale = sub_group.get(local + ".weight_scale")
+        # sub_group keys keep the full tensor name (e.g. "self_attn.q.weight_scale"),
+        # so the scale key is local + "_scale" (local already ends in ".weight").
+        scale = sub_group.get(local + "_scale")
         new_w, new_scale = _apply_streaming_loras(sub_group[local], g_list, scale)
         sub_group[local] = new_w
         if new_scale is not None:
-            sub_group[local + ".weight_scale"] = new_scale
+            sub_group[local + "_scale"] = new_scale
 
 
+# ---------------------------------------------------------------------------
+# Shared model-config detection (used by both streaming and full-dict paths)
+# ---------------------------------------------------------------------------
+
+def _detect_model_config(lookup_shape, *, keys=None, has_dtype=None):
+    """Detect model architecture & quantization from a shape/dtype lookup.
+
+    Parameters
+    ----------
+    lookup_shape:
+        ``Callable[[str], tuple[int, ...]]`` — returns tensor shape for a
+        canonical key (e.g. ``"blocks.0.self_attn.q.weight"``).
+    keys:
+        Optional iterable of canonical keys to scan for ``.weight_scale``
+        suffixes (faster than probing one by one).  If ``None`` the function
+        probes a few known keys.
+    has_dtype:
+        ``Callable[[str], torch.dtype | None]`` — returns tensor dtype for
+        a key, or ``None`` if unavailable.  Used for fp8 detection.
+
+    Returns
+    -------
+    dict
+        ``unet_config`` ready to pass to ``_build_bernini_base``.
+    str | None
+        Quantization format string (e.g. ``"fp8_e4m3fn_scaled"``).
+    torch.dtype | None
+        Weight dtype (e.g. ``torch.float8_e4m3fn``).
+    int
+        Total parameter count (for VRAM estimation).
+    """
+    dim = lookup_shape("patch_embedding.weight")[0]
+    num_heads = dim // 128
+    in_dim = lookup_shape("patch_embedding.weight")[1]
+
+    # Block indices → num_layers
+    block_keys = [k for k in (keys or ()) if k.startswith("blocks.")]
+    if block_keys:
+        indices = {int(k.split(".")[1]) for k in block_keys
+                   if k.split(".")[1].isdigit()}
+        num_layers = max(indices) + 1
+    else:
+        num_layers = 30  # fallback
+
+    ffn_dim = lookup_shape("blocks.0.ffn.0.weight")[0]
+
+    try:
+        out_dim = lookup_shape("head.head.weight")[0] // 4
+    except (KeyError, IndexError):
+        out_dim = 16  # fallback
+
+    # Variant
+    if dim == 5120:
+        model_variant = "14B"
+    elif dim == 3072:
+        model_variant = "5B"
+    elif dim == 1536:
+        model_variant = "1_3B"
+    else:
+        model_variant = "unknown"
+
+    # Quantization detection
+    quantization = None
+    weight_dtype = None
+    is_scaled_fp8 = False
+    if keys:
+        is_scaled_fp8 = any(
+            k.endswith((".scale_weight", ".weight_scale", ".weight_scale_2"))
+            for k in keys
+        )
+        if is_scaled_fp8:
+            for k in keys:
+                if k.endswith(".weight_scale_2"):
+                    quantization = "nvfp4"
+                    break
+
+    if has_dtype is not None:
+        for probe in ("head.modulation", "time_projection.0.weight",
+                      "time_embedding.0.weight", "blocks.0.self_attn.q.weight"):
+            dt = has_dtype(probe)
+            if dt is None:
+                continue
+            weight_dtype = dt
+            if dt in (torch.float8_e4m3fn, torch.float8_e5m2):
+                quantization = f"fp8_e4m3fn" if dt == torch.float8_e4m3fn else "fp8_e5m2"
+                break
+
+    if is_scaled_fp8 and quantization:
+        quantization += "_scaled"
+
+    # Total parameters
+    parameters = 0
+    if keys:
+        for k in keys:
+            s = lookup_shape(k)
+            if len(s) >= 2:
+                parameters += s[0] * s[1]
+            elif len(s) == 1:
+                parameters += s[0]
+            # scalars (0-dim, shape=()) contribute 1 element
+
+    unet_config = {
+        "dim": dim, "out_dim": out_dim, "num_heads": num_heads,
+        "ffn_dim": ffn_dim, "num_layers": num_layers,
+        "patch_size": (1, 2, 2), "freq_dim": 256, "in_dim": in_dim,
+        "qk_norm": True, "cross_attn_norm": True, "eps": 1e-6,
+        "window_size": (-1, -1), "text_dim": 4096,
+        "model_variant": model_variant,
+    }
+    return unet_config, quantization, weight_dtype, parameters, num_layers
 
 
 def _load_bernini_model_safetensors_streaming(
@@ -1162,6 +1295,8 @@ def _load_bernini_model_safetensors_streaming(
     model_options: dict,
     lora_specs: list | None,
     block_swap: bool = False,
+    lazy: bool = False,
+    block_reader: object | None = None,
 ) -> object:
     """Memory-efficient loader for safetensors checkpoints.
 
@@ -1188,101 +1323,27 @@ def _load_bernini_model_safetensors_streaming(
         def _shape(key: str):
             return tuple(f.get_slice(key).get_shape())
 
-        # ── Config detection from metadata only ─────────────────────────
-        if "patch_embedding.weight" in norm_map:
-            dim = _shape(norm_map["patch_embedding.weight"])[0]
-        elif "patch_embedding.0.weight" in norm_map:
-            dim = _shape(norm_map["patch_embedding.0.weight"])[0]
-        elif "head.modulation" in norm_map:
-            dim = _shape(norm_map["head.modulation"])[-1]
-        else:
-            raise KeyError("Cannot detect model dimension: no patch_embedding "
-                           "or head.modulation found")
-
-        num_heads = dim // 128
-        block_indices = {
-            int(k.split('.')[1])
-            for k in norm_map
-            if k.startswith('blocks.') and k.split('.')[1].isdigit()
-        }
-        num_layers = max(block_indices) + 1 if block_indices else 30
-
-        ffn_dim = None
-        for k in ('blocks.0.ffn.0.weight', 'blocks.0.ffn.w1.weight',
-                  'blocks.0.ffn.fc1.weight', 'blocks.0.ffn.0.bias'):
-            if k in norm_map:
-                ffn_dim = _shape(norm_map[k])[0]
-                break
-        if ffn_dim is None:
-            raise KeyError("Cannot detect FFN dimension")
-
-        in_dim = None
-        for k in ('patch_embedding.weight', 'patch_embedding.0.weight'):
-            if k in norm_map:
-                in_dim = _shape(norm_map[k])[1]
-                break
-        if in_dim is None:
-            raise KeyError("Cannot detect in_dim")
-
-        out_dim = 16
-        for k in ('head.head.weight', 'head.head.0.weight'):
-            if k in norm_map:
-                out_dim = _shape(norm_map[k])[0] // 4
-                break
-
-        if dim == 5120:
-            model_variant = "14B"
-        elif dim == 3072:
-            model_variant = "5B"
-        elif dim == 1536:
-            model_variant = "1_3B"
-        else:
-            model_variant = "unknown"
-
-        # Quantization detection
-        weight_dtype_val = None
-        quantization = None
-        is_scaled_fp8 = any(
-            k.endswith((".scale_weight", ".weight_scale", ".weight_scale_2"))
-            for k in norm_map
-        )
-        if is_scaled_fp8:
-            for k in norm_map:
-                if k.endswith(".weight_scale_2"):
-                    quantization = "nvfp4"
-                    break
-
-        for k in ('head.modulation', 'time_projection.0.weight',
-                  'time_embedding.0.weight', 'blocks.0.self_attn.q.weight'):
-            if k not in norm_map:
-                continue
+        # ── Config detection via shared helper ─────────────────────────
+        def _sd_key(k):
+            return norm_map.get(k)
+        _canonical_keys = list(norm_map.keys())
+        def _stream_has_dtype(k):
+            rk = norm_map.get(k)
+            if rk is None:
+                return None
             try:
-                dtype = f.get_tensor(norm_map[k]).dtype
+                return f.get_tensor(rk).dtype
             except Exception:
-                continue
-            weight_dtype_val = dtype
-            if dtype == torch.float8_e4m3fn:
-                quantization, weight_dtype_val = "fp8_e4m3fn", torch.float8_e4m3fn
-                break
-            elif dtype == torch.float8_e5m2:
-                quantization, weight_dtype_val = "fp8_e5m2", torch.float8_e5m2
-                break
+                return None
 
-        if is_scaled_fp8 and quantization:
-            quantization += "_scaled"
-
-        parameters = sum(math.prod(_shape(k)) for k in raw_keys)
+        unet_config, quantization, weight_dtype_val, parameters, num_layers = \
+            _detect_model_config(
+                lambda k: _shape(norm_map[k]),
+                keys=_canonical_keys,
+                has_dtype=_stream_has_dtype,
+            )
 
     # Build model
-    unet_config = {
-        'dim': dim, 'out_dim': out_dim, 'num_heads': num_heads,
-        'ffn_dim': ffn_dim, 'num_layers': num_layers,
-        'patch_size': (1, 2, 2), 'freq_dim': 256, 'in_dim': in_dim,
-        'qk_norm': True, 'cross_attn_norm': True, 'eps': 1e-6,
-        'window_size': (-1, -1), 'text_dim': 4096,
-        'model_variant': model_variant,
-    }
-
     fp8 = quantization is not None and 'fp8' in quantization
     base, load_device, offload_device = _build_bernini_base(
         unet_config, model_options, fp8, quantization,
@@ -1300,12 +1361,17 @@ def _load_bernini_model_safetensors_streaming(
     if block_swap:
         _materialize_block_weight_slots(dm)
 
+    # In lazy mode, a RandomAccessBlockReader is provided to the
+    # BlockSwapManager so it can load blocks from disk on demand.
+    # Only peripheral modules are loaded now; block weights stay empty.
+    if lazy and block_reader is not None:
+        dm._block_reader = block_reader
+
     # Pre-load LoRAs (small) so they can be folded block-by-block.
     lora_groups = _build_streaming_lora_groups(lora_specs)
+    dm._lora_groups = lora_groups
 
-    # Per-block metadata for block-swap VRAM estimates.  Blocks are now
-    # streamed into the CPU model during the pass below (no longer dropped),
-    # but we still record key lists and byte counts for BlockSwapManager.
+    # Per-block metadata for block-swap VRAM estimates.
     block_plan: dict = {}
     block_bytes: dict = {}
     block_mb: dict = {}
@@ -1327,29 +1393,46 @@ def _load_bernini_model_safetensors_streaming(
 
             if current_group is not None and group_key != current_group:
                 if current_group.startswith("blocks."):
-                    # Stream: load block into CPU model immediately (no more
-                    # wasteful read-and-discard).  In block-swap mode we also
-                    # record per-block metadata so BlockSwapManager has VRAM
-                    # size estimates without a separate pre-scan pass.
-                    _stream_load_group(dm, current_group, group, lora_groups)
-                    if block_swap:
-                        _record_block_meta(
-                            current_group, group, block_plan, block_bytes, block_mb)
+                    if lazy:
+                        # In lazy mode: record metadata only — do NOT load
+                        # block weights into RAM.  BlockSwapManager's
+                        # _DiskPrefetcher will load them on demand.
+                        if block_swap:
+                            _record_block_meta(
+                                current_group, group, block_plan, block_bytes, block_mb)
+                    else:
+                        _stream_load_group(dm, current_group, group, lora_groups)
+                        if block_swap:
+                            _record_block_meta(
+                                current_group, group, block_plan, block_bytes, block_mb)
                 else:
                     _stream_load_group(dm, current_group, group, lora_groups)
                 group.clear()
 
             current_group = group_key
 
-            tensor = f.get_tensor(raw_key)
-            group[target_key] = tensor
+            # In lazy block-swap mode the block weights are NOT loaded here
+            # (the _DiskPrefetcher reads them on demand during sampling).  We
+            # only need per-block byte/param counts for the VRAM estimate, so
+            # take them from the header instead of reading the full tensor —
+            # this avoids a pointless ~28 GB (14B bf16) sequential disk read
+            # that otherwise dominates load time (~25 s).
+            is_block_key = len(parts) >= 2 and parts[0] == 'blocks'
+            if lazy and block_swap and is_block_key:
+                group[target_key] = f.tensor_meta(raw_key)  # (nbytes, numel)
+            else:
+                group[target_key] = f.get_tensor(raw_key)
 
         if group:
             if current_group.startswith("blocks."):
-                _stream_load_group(dm, current_group, group, lora_groups)
-                if block_swap:
-                    _record_block_meta(
-                        current_group, group, block_plan, block_bytes, block_mb)
+                if lazy:
+                    if block_swap:
+                        _record_block_meta(current_group, group, block_plan, block_bytes, block_mb)
+                else:
+                    _stream_load_group(dm, current_group, group, lora_groups)
+                    if block_swap:
+                        _record_block_meta(
+                            current_group, group, block_plan, block_bytes, block_mb)
             else:
                 _stream_load_group(dm, current_group, group, lora_groups)
             group.clear()
@@ -1360,31 +1443,52 @@ def _load_bernini_model_safetensors_streaming(
             missing_base,
         )
 
-    # In block-swap mode we pre-warm the first window of blocks to GPU
-    # during the streaming pass so the GPU window is ready immediately.
-    # Blocks beyond the window stay in CPU RAM; BlockSwapManager manages
-    # GPU↔CPU movement with no further disk I/O.
+    # In lazy mode, block weights are NOT loaded into CPU RAM yet.
+    # BlockSwapManager's _DiskPrefetcher reads them from disk on demand
+    # when prepare() is called.  Only VRAM metadata is stored.
     if block_swap:
-        DEFAULT_WINDOW = 10
-        warm_blocks = min(DEFAULT_WINDOW, num_layers)
-        for idx in range(warm_blocks):
-            dm.blocks[idx].to(load_device)
         avg_mb = sum(block_mb.values()) / len(block_mb) if block_mb else 0.0
         dm._block_meta = {'block_mb': dict(block_mb), 'avg_mb': avg_mb}
-        dm._prewarmed = warm_blocks
-        logger.info("[BerniniR] Pre-warmed block window: %d / %d blocks to GPU",
-                    warm_blocks, num_layers)
+        if lazy:
+            # No pre-warm — BlockSwapManager loads first window on first
+            # prepare(0) call via _DiskPrefetcher.
+            dm._prewarmed = 0
+            dm._lora_groups = lora_groups
+            logger.info("[BerniniR] Lazy mode: %d blocks, metadata only, no pre-warm",
+                        num_layers)
+        else:
+            DEFAULT_WINDOW = 10
+            warm_blocks = min(DEFAULT_WINDOW, num_layers)
+            for idx in range(warm_blocks):
+                dm.blocks[idx].to(load_device)
+            dm._prewarmed = warm_blocks
+            logger.info("[BerniniR] Pre-warmed block window: %d / %d blocks to GPU",
+                        warm_blocks, num_layers)
 
     mp = comfy.model_patcher.ModelPatcher(
         base, load_device=load_device, offload_device=offload_device)
 
-    # Blocks are loaded now (streamed into model during the pass above),
-    # so verify ALL weights — no skips needed.
-    _verify_weights_loaded(dm, skip_blocks=False)
+    # In lazy mode, block weights are NOT loaded yet — skip per-block
+    # verification and only check peripheral modules.
+    if lazy:
+        _verify_weights_loaded(
+            dm, skip_blocks=True,
+            warning_msg="lazy-load — blocks will be loaded on demand",
+        )
+    else:
+        _verify_weights_loaded(dm, skip_blocks=False)
 
-    logger.info("[BerniniR] Stream-loaded: dim=%d heads=%d layers=%d ffn=%d "
-                "variant=%s quant=%s", dim, num_heads, num_layers, ffn_dim,
-                model_variant, quantization or 'none')
+    mode = "lazy" if lazy else "eager"
+    logger.info("[BerniniR] Stream-loaded (%s): dim=%(dim)d heads=%(num_heads)d "
+                "layers=%(num_layers)d ffn=%(ffn_dim)d "
+                "variant=%(model_variant)s quant=%(quant)s",
+                {"mode": mode,
+                 "dim": unet_config["dim"],
+                 "num_heads": unet_config["num_heads"],
+                 "num_layers": unet_config["num_layers"],
+                 "ffn_dim": unet_config["ffn_dim"],
+                 "model_variant": unet_config["model_variant"],
+                 "quant": quantization or "none"})
     return mp
 
 
@@ -1404,8 +1508,14 @@ def _record_block_meta(current_group, group, block_plan, block_bytes, block_mb):
     nb = 0
     nv = 0
     for t in group.values():
-        nb += t.numel() * t.element_size()
-        nv += t.numel() * 2  # VRAM budget estimated as half precision
+        if isinstance(t, tuple):
+            # Lazy mode: (nbytes, numel) from the header — no tensor read.
+            nbytes, numel = t
+            nb += nbytes
+            nv += numel * 2  # VRAM budget estimated as half precision
+        else:
+            nb += t.numel() * t.element_size()
+            nv += t.numel() * 2  # VRAM budget estimated as half precision
     block_bytes[idx] = nb
     block_mb[idx] = nv / (1024 * 1024)
 
@@ -1434,21 +1544,28 @@ def _stream_load_group(dm, group_key, group, lora_groups=None):
         try:
             idx = int(group_key.split(".")[1])
         except (IndexError, ValueError):
-            dm.load_state_dict(group, strict=False, assign=False)
+            with torch.inference_mode():
+                dm.load_state_dict(group, strict=False, assign=False)
             return
         sub = dm.blocks[idx]
     elif hasattr(dm, group_key):
         sub = getattr(dm, group_key)
     else:
         # Unknown top-level key — fall back to a full-model load.
-        dm.load_state_dict(group, strict=False, assign=False)
+        with torch.inference_mode():
+            dm.load_state_dict(group, strict=False, assign=False)
         return
     sub_group = {k[len(prefix):]: v for k, v in group.items() if k.startswith(prefix)}
 
     # Fold any LoRAs targeting this group now that weight_scale is in scope.
     _fold_group_loras(sub_group, prefix, lora_groups)
 
-    sub.load_state_dict(sub_group, strict=False, assign=False)
+    # Block params are inference tensors (model built under InferenceMode).
+    # load_state_dict(assign=False) does an in-place copy_ which is forbidden
+    # outside InferenceMode -> wrap the copy so it is allowed while keeping the
+    # params as inference tensors.
+    with torch.inference_mode():
+        sub.load_state_dict(sub_group, strict=False, assign=False)
 
 
 def _materialize_block_weight_slots(dm):
@@ -1495,11 +1612,11 @@ def _materialize_block_weight_slots(dm):
                     pass
 
 
-def _verify_weights_loaded(dm, skip_blocks: bool = False):
+def _verify_weights_loaded(dm, skip_blocks: bool = False, warning_msg: str = ""):
     """Warn if any ComfyUI ops layer still has a None weight after loading.
 
-    When *skip_blocks* is set (streaming block-swap), transformer blocks are
-    intentionally not resident at load time -- they are read from disk on
+    When *skip_blocks* is set (streaming block-swap / lazy), transformer blocks
+    are intentionally not resident at load time -- they are read from disk on
     demand -- so only peripheral / top-level modules are checked.
     """
     for name, module in dm.named_modules():
@@ -1512,18 +1629,24 @@ def _verify_weights_loaded(dm, skip_blocks: bool = False):
         if skip_blocks and name.startswith("blocks."):
             continue
         if module.weight is None:
+            suffix = f" ({warning_msg})" if warning_msg else ""
             logger.error(
-                "[BerniniR] Weight not loaded: %s — state dict key mismatch?",
-                name)
+                "[BerniniR] Weight not loaded: %s — state dict key mismatch?%s",
+                name, suffix)
 
 
-def load_bernini_model(model_path, model_options=None, state_dict=None, lora_specs=None, block_swap: bool = False) -> object:
+def load_bernini_model(model_path, model_options=None, state_dict=None, lora_specs=None, block_swap: bool = False, lazy: bool = False, block_reader=None) -> object:
     """Load a Bernini-R / Wan checkpoint.  Fully self-contained —
     no ``model_detection`` / ``supported_models`` dependency.
 
     For ``.safetensors`` files this now uses a streaming loader that avoids
     holding the full state dict in RAM.  ``.pt`` / ``.ckpt`` files still fall
     back to the full-dict path.
+
+    When *lazy* is True, transformer block weights are NOT loaded into CPU RAM
+    during this call.  Instead, a ``RandomAccessBlockReader`` is stored on the
+    model for on-demand block loading by ``BlockSwapManager``'s
+    ``_DiskPrefetcher``.
     """
     import comfy.model_patcher
     import comfy.model_management
@@ -1538,7 +1661,8 @@ def load_bernini_model(model_path, model_options=None, state_dict=None, lora_spe
         lower_path = model_path.lower()
         if lower_path.endswith(".safetensors") or lower_path.endswith(".sft"):
             return _load_bernini_model_safetensors_streaming(
-                model_path, model_options, lora_specs, block_swap)
+                model_path, model_options, lora_specs, block_swap,
+                lazy=lazy, block_reader=block_reader)
         sd = comfy.utils.load_torch_file(model_path)
 
     if lora_specs and state_dict is None:
@@ -1557,88 +1681,24 @@ def load_bernini_model(model_path, model_options=None, state_dict=None, lora_spe
                  .replace("modulation.modulation", "modulation"): v
               for k, v in sd.items()}
 
-    # Config detection
-    if 'patch_embedding.weight' in sd:
-        dim = sd['patch_embedding.weight'].shape[0]
-    elif 'patch_embedding.0.weight' in sd:
-        dim = sd['patch_embedding.0.weight'].shape[0]
-    elif 'head.modulation' in sd:
-        dim = sd['head.modulation'].shape[-1]
-    else:
-        raise KeyError("Cannot detect model dimension: no patch_embedding "
-                       "or head.modulation found")
+    # Config detection via shared helper
+    def _sd_shape(k):
+        return tuple(sd[k].shape)
+    def _sd_has_dtype(k):
+        t = sd.get(k)
+        return t.dtype if t is not None else None
+    canon_keys = [k for k in sd if isinstance(sd.get(k), torch.Tensor)]
 
-    num_heads = dim // 128
-    block_indices = {int(k.split('.')[1]) for k in sd
-                     if k.startswith('blocks.') and k.split('.')[1].isdigit()}
-    num_layers = max(block_indices) + 1 if block_indices else 30
-
-    ffn_dim = None
-    for k in ('blocks.0.ffn.0.weight', 'blocks.0.ffn.w1.weight',
-              'blocks.0.ffn.fc1.weight', 'blocks.0.ffn.0.bias'):
-        if k in sd: ffn_dim = sd[k].shape[0]; break
-    if ffn_dim is None:
-        raise KeyError("Cannot detect FFN dimension")
-
-    in_dim = None
-    for k in ('patch_embedding.weight', 'patch_embedding.0.weight'):
-        if k in sd: in_dim = sd[k].shape[1]; break
-    if in_dim is None:
-        raise KeyError("Cannot detect in_dim")
-
-    out_dim = None
-    for k in ('head.head.weight', 'head.head.0.weight'):
-        if k in sd:
-            out_dim = sd[k].shape[0] // 4
-            break
-    if out_dim is None:
-        out_dim = 16
-
-    if dim == 5120:
-        model_variant = "14B"
-    elif dim == 3072:
-        model_variant = "5B"
-    elif dim == 1536:
-        model_variant = "1_3B"
-    else:
-        model_variant = "unknown"
-
-    # Quantization detection
-    weight_dtype = None
-    quantization = None
-    is_scaled_fp8 = False
-    for k, v in sd.items():
-        if isinstance(v, torch.Tensor):
-            if v.dtype == torch.float8_e4m3fn:
-                quantization, weight_dtype = 'fp8_e4m3fn', torch.float8_e4m3fn
-            elif v.dtype == torch.float8_e5m2:
-                quantization, weight_dtype = 'fp8_e5m2', torch.float8_e5m2
-        if k.endswith('.scale_weight') or k.endswith('.weight_scale'):
-            is_scaled_fp8 = True
-        if k.endswith('.weight_scale_2'):
-            is_scaled_fp8 = True
-            if quantization is None:
-                quantization = 'nvfp4'
-        if quantization and is_scaled_fp8:
-            break
-    if is_scaled_fp8 and quantization:
-        quantization += '_scaled'
-
-    parameters = comfy.utils.calculate_parameters(sd)
+    unet_config, quantization, weight_dtype, parameters, num_layers = \
+        _detect_model_config(
+            _sd_shape, keys=canon_keys, has_dtype=_sd_has_dtype,
+        )
     fp8 = quantization is not None and 'fp8' in quantization
-
-    unet_config = {
-        'dim': dim, 'out_dim': out_dim, 'num_heads': num_heads,
-        'ffn_dim': ffn_dim, 'num_layers': num_layers,
-        'patch_size': (1, 2, 2), 'freq_dim': 256, 'in_dim': in_dim,
-        'qk_norm': True, 'cross_attn_norm': True, 'eps': 1e-6,
-        'window_size': (-1, -1), 'text_dim': 4096,
-        'model_variant': model_variant,
-    }
 
     base, load_device, offload_device = _build_bernini_base(
         unet_config, model_options, fp8, quantization,
-        parameters=parameters, weight_dtype=weight_dtype or comfy.utils.weight_dtype(sd),
+        parameters=parameters,
+        weight_dtype=weight_dtype or comfy.utils.weight_dtype(sd),
         block_swap=block_swap,
     )
     dm = base.diffusion_model
@@ -1650,7 +1710,12 @@ def load_bernini_model(model_path, model_options=None, state_dict=None, lora_spe
 
     _verify_weights_loaded(dm)
 
-    logger.info("[BerniniR] Loaded: dim=%d heads=%d layers=%d ffn=%d "
-                "variant=%s quant=%s", dim, num_heads, num_layers, ffn_dim,
-                model_variant, quantization or 'none')
+    logger.info("[BerniniR] Loaded: dim=%(dim)d heads=%(num_heads)d "
+                "layers=%(num_layers)d ffn=%(ffn_dim)d "
+                "variant=%(model_variant)s quant=%(quant)s",
+                {"dim": unet_config["dim"], "num_heads": unet_config["num_heads"],
+                 "num_layers": unet_config["num_layers"],
+                 "ffn_dim": unet_config["ffn_dim"],
+                 "model_variant": unet_config["model_variant"],
+                 "quant": quantization or "none"})
     return mp

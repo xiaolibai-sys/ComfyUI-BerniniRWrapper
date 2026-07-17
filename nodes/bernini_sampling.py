@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 import comfy.model_management
@@ -725,7 +725,7 @@ def bernini_sample(
     seed: int = 0,
     guidance_config: BerniniGuidanceConfig | None = None,
     guidance_schedule: list[float] | None = None,
-    block_swap_args: dict | None = None,
+    block_swap_args: Any = None,
     flow_shift: float = 3.0,
     context_options: dict | None = None,
     callback=None,
@@ -753,8 +753,7 @@ def bernini_sample(
     # Block swap ON -> the model is the single copy on CPU and BlockSwapManager
     # windows a slice onto the GPU; we must NOT let ComfyUI hoist the whole
     # model onto the GPU first (that would be a second full copy).
-    model = model_handle.load(
-        block_swap=(block_swap_args.block_to_swap > 0) if block_swap_args else False)
+    model = model_handle.load(block_swap_config=block_swap_args)
 
     # ── Prepare latent ────────────────────────────────────────────────
     latent = dict(latent_image)
@@ -944,7 +943,7 @@ def bernini_sample_dual(
     guidance_schedule: list[float] | None = None,
     flow_shift: float = 3.0,
     context_options: dict | None = None,
-    block_swap_args: dict | None = None,
+    block_swap_args: Any = None,
     callback=None,
     disable_pbar: bool = False,
 ) -> dict:
@@ -963,8 +962,7 @@ def bernini_sample_dual(
 
     # ── Load high-noise model ─────────────────────────────────────────
     # Block swap ON -> single copy on CPU, BlockSwapManager owns the GPU.
-    high_patcher = high_model.load(
-        block_swap=(block_swap_args.block_to_swap > 0) if block_swap_args else False)
+    high_patcher = high_model.load(block_swap_config=block_swap_args)
 
     # ── Prepare latent ────────────────────────────────────────────────
     latent = dict(latent_image)
@@ -1154,8 +1152,7 @@ def bernini_sample_dual(
         # 4. Now that high is fully gone, load the low-noise expert.
         # Block swap ON -> single copy on CPU; with high already deterministically
         # freed there is no whole-model GPU allocation to collide with.
-        low_patcher = low_model.load(
-            block_swap=(inj.block_to_swap > 0) if inj.block_to_swap > 0 else False)
+        low_patcher = low_model.load(block_swap_config=block_swap_args)
 
         if hasattr(low_patcher.model, 'model_sampling'):
             ms = low_patcher.model.model_sampling

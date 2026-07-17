@@ -61,6 +61,7 @@ class InjectionContext:
     block_swap_prefetch: bool = True
     block_swap_prefetch_count: int = 1
     block_swap_pin_memory: bool = False
+    block_swap_loading_mode: str = "Streaming"
     context_window_wrapper: callable | None = None
 
     # -- parsed STG -----------------------------------------------------------
@@ -134,6 +135,7 @@ class InjectionContext:
             ctx.block_swap_prefetch = block_swap_args.prefetch
             ctx.block_swap_prefetch_count = block_swap_args.prefetch_count
             ctx.block_swap_pin_memory = block_swap_args.pin_memory
+            ctx.block_swap_loading_mode = block_swap_args.loading_mode
 
         ctx.context_window_wrapper = context_window_wrapper
 
@@ -219,12 +221,6 @@ class InjectionContext:
 
         extra_model_options.setdefault("transformer_options", {}).update({
             "_block_swap": True,
-            "_block_swap_args": {
-                "window_size": blocks_on_gpu,
-                "prefetch": self.block_swap_prefetch,
-                "prefetch_count": self.block_swap_prefetch_count,
-                "pin_memory": self.block_swap_pin_memory,
-            },
         })
 
     def apply_noise(

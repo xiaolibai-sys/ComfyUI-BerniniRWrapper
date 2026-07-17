@@ -17,7 +17,7 @@ from ..utils.types import BerniniContext, ContextSchedule, FuseMethod
 logger = logging.getLogger(__name__)
 
 CONTEXT_SCHEDULES = ["uniform_standard", "uniform_looped", "static_standard"]
-FUSE_METHODS = ["linear", "pyramid"]
+FUSE_METHODS = ["linear", "smooth", "pyramid"]
 
 
 class BerniniR_ContextWindow:
@@ -36,7 +36,11 @@ class BerniniR_ContextWindow:
         context_overlap (INT): Overlap between windows in pixel frames (default 16).
         freenoise (BOOLEAN): Shuffle noise across windows to reduce tiling artifacts.
         fuse_method (COMBO): Window blending function.
-            - ``linear``: Ramp 0→1 on left overlap, 1→0 on right overlap.
+            - ``linear``:  Ramp 0→1 on left overlap, 1→0 on right overlap.
+            - ``smooth``:  Smoothstep-eased crossfade (C1-continuous) — same as
+                           linear but with zero slope at the edges, so the
+                           transition band reads as far less of a brightness
+                           bump / graying at window seams. Recommended default.
             - ``pyramid``: Triangle weights peaking at window centre.
 
     Output:
@@ -54,7 +58,7 @@ class BerniniR_ContextWindow:
                 "freenoise": ("BOOLEAN", {"default": True, "tooltip": "Shuffle noise across windows to reduce seam artifacts"}),
             },
             "optional": {
-                "fuse_method": (FUSE_METHODS, {"default": "linear", "tooltip": "Blending: 'linear' = crossfade at edges, 'pyramid' = triangle weights peaking at center"}),
+                "fuse_method": (FUSE_METHODS, {"default": "smooth", "tooltip": "Blending: 'smooth' (default) = smoothstep crossfade (softest seams), 'linear' = crossfade at edges, 'pyramid' = triangle weights peaking at center"}),
                 "rope_ntk_scale": ("FLOAT", {"default": 1.0, "min": 1.0, "max": 8.0, "step": 0.05, "tooltip": "NTK RoPE frequency scaling for sequences longer than training. 1.0 = off. 2.0 = moderate (2x training length), 3.0+ = aggressive. Scales rope_embedder.theta to prevent positional collapse."}),
             },
         }
@@ -77,7 +81,7 @@ class BerniniR_ContextWindow:
         context_stride: int = 4,
         context_overlap: int = 16,
         freenoise: bool = True,
-        fuse_method: str = "linear",
+        fuse_method: str = "smooth",
         rope_ntk_scale: float = 1.0,
     ):
         ctx = BerniniContext(

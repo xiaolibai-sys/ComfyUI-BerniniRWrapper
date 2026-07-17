@@ -14,6 +14,14 @@ from enum import Enum
 from typing import Any, Iterator
 
 import torch
+import torch.nn as nn
+
+# Lazy import for comfy_kitchen (only resolved in ComfyUI environment).
+try:
+    from comfy_kitchen.tensor.base import QuantizedTensor, get_layout_class as _get_layout_class
+except ImportError:
+    QuantizedTensor = None  # type: ignore[assignment]
+    _get_layout_class = None  # type: ignore[assignment]
 
 
 # ---------------------------------------------------------------------------
@@ -28,9 +36,11 @@ class ContextSchedule(str, Enum):
 
 
 class FuseMethod(str, Enum):
-    """Window-blending functions."""
+    """Context-window fusion methods."""
     LINEAR = "linear"
+    SMOOTH = "smooth"
     PYRAMID = "pyramid"
+    NONE = "none"
 
 
 class GuidanceMode(str, Enum):
@@ -106,6 +116,141 @@ class BerniniBlockSwap:
     prefetch: bool = True
     prefetch_count: int = 1
     pin_memory: bool = False
+    loading_mode: str = "Streaming"  # "Full" or "Streaming"
+
+    @property
+    def lazy(self) -> bool:
+        """Whether to load block weights on demand (streaming) or all at once.
+        
+        - Streaming: blocks loaded from disk on demand by _DiskPrefetcher.
+        - Full: all block weights loaded into CPU RAM at startup, then
+          BlockSwapManager moves them to the GPU window as needed.
+        """
+        return self.loading_mode == "Streaming"
+
+
+@dataclass(frozen=True)
+class DiskLoadRequest:
+    """A single disk→RAM block-load job handed to the prefetch thread pool.
+
+    Carries everything ``_DiskPrefetcher`` needs to populate one transformer
+    block, so the forward thread dispatches work to the pool with the same
+    typed ``@dataclass(frozen=True)`` payload convention used everywhere else
+    in Bernini-R instead of passing a bare ``block_idx`` integer.
+    """
+
+    block_idx: int
+    group_key: str
+
+
+# ---------------------------------------------------------------------------
+# Slot entry — unified type for ring-buffer slot pool
+# ---------------------------------------------------------------------------
+
+class SlotEntry:
+    """Unified slot entry for the engine's ring-buffer slot pool.
+
+    Wraps either a regular ``torch.Tensor`` or the internal components of a
+    comfy_kitchen ``QuantizedTensor`` (``_qdata`` + ``_params.scale``), so
+    the swap engine never branches on parameter type.
+    """
+
+    __slots__ = ('is_qt', 'data', 'scale', 'layout_cls', 'orig_dtype',
+                 'orig_shape')
+
+    def __init__(self, *, data: torch.Tensor,
+                 scale: torch.Tensor | None = None,
+                 layout_cls: str = '',
+                 orig_dtype: torch.dtype | None = None,
+                 orig_shape: tuple[int, ...] | None = None):
+        self.is_qt = scale is not None
+        self.data = data
+        self.scale = scale
+        self.layout_cls = layout_cls
+        self.orig_dtype = orig_dtype
+        self.orig_shape = orig_shape
+
+    @classmethod
+    def empty_like(cls, param: nn.Parameter, device, pin_memory: bool = False):
+        """Pre-allocate a slot buffer matching *param* on *device*."""
+        d = param.data
+        if hasattr(d, '_qdata'):
+            return cls(
+                data=torch.empty_like(
+                    d._qdata, device=device,
+                    pin_memory=(device == "cpu" and pin_memory)),
+                scale=torch.empty_like(
+                    d._params.scale, device=device,
+                    pin_memory=(device == "cpu" and pin_memory)),
+                layout_cls=d._layout_cls,
+                orig_dtype=d._params.orig_dtype,
+                orig_shape=tuple(d.shape),
+            )
+        return cls(
+            data=torch.empty_like(d, device=device,
+                                  pin_memory=(device == 'cpu' and pin_memory)),
+        )
+
+    @classmethod
+    def empty_like_entry(cls, entry: "SlotEntry", device,
+                         pin_memory: bool = False):
+        """Pre-allocate a slot buffer on *device* matching *entry*'s layout.
+
+        Unlike ``empty_like`` (which reads from an ``nn.Parameter``), this
+        reads from another ``SlotEntry`` — safe when the source parameter
+        may already be on a different device.
+        """
+        if entry.is_qt:
+            return cls(
+                data=torch.empty_like(
+                    entry.data, device=device,
+                    pin_memory=(device == "cpu" and pin_memory)),
+                scale=torch.empty_like(
+                    entry.scale, device=device,
+                    pin_memory=(device == "cpu" and pin_memory)),
+                layout_cls=entry.layout_cls,
+                orig_dtype=entry.orig_dtype,
+                orig_shape=entry.orig_shape,
+            )
+        return cls(
+            data=torch.empty_like(
+                entry.data, device=device,
+                pin_memory=(device == 'cpu' and pin_memory)),
+        )
+
+    def copy_from(self, param: nn.Parameter, non_blocking: bool = False) -> None:
+        """Copy *param*'s weight data into this pre-allocated buffer."""
+        d = param.data
+        if self.is_qt:
+            self.data.copy_(d._qdata, non_blocking=non_blocking)
+            self.scale.copy_(d._params.scale, non_blocking=non_blocking)
+        else:
+            self.data.copy_(d, non_blocking=non_blocking)
+
+    def assign_to(self, block: nn.Module, param_name: str) -> None:
+        """Wire this buffer's data into *block*'s submodule ``_parameters``.
+
+        Quantized entries: reconstruct a fresh GPU ``QuantizedTensor`` and
+        replace the parameter via ``_parameters`` dict (bypasses the broken
+        ``p.data = ...`` on wrapper subclasses).
+        Regular entries: ``_parameters[name].data = ...`` (works normally).
+        """
+        *mod_path, pn = param_name.split('.')
+        sub = block
+        for part in mod_path:
+            sub = getattr(sub, part)
+
+        if self.is_qt:
+            layout_cls = _get_layout_class(self.layout_cls)
+            params = layout_cls.Params(
+                scale=self.scale,
+                orig_dtype=self.orig_dtype,
+                orig_shape=self.orig_shape,
+            )
+            qt = QuantizedTensor(self.data, self.layout_cls, params)
+            sub._parameters[pn] = nn.Parameter(qt, requires_grad=False)
+        else:
+            sub._parameters[pn].data = self.data
 
 
 @dataclass(frozen=True)

@@ -33,7 +33,11 @@ try:
 except Exception:
     latent_preview = None
 
-from ..context.windows import get_context_scheduler, create_window_mask
+from ..context.windows import (
+    get_context_scheduler,
+    create_window_mask,
+    does_window_roll_over,
+)
 from ..utils.types import (
     BerniniContext,
     BerniniBlockSwap,
@@ -313,7 +317,10 @@ def _build_context_window_wrapper(
                 windows_list.append((w, w_idx, w_cpu))
                 tw = len(w)
                 if is_static:
-                    # Measure actual overlap with neighbours for crossfade
+                    # Measure actual overlap with neighbours so the mask gets a
+                    # real crossfade ramp at every window boundary.  (uniform_*
+                    # keeps left_ol=right_ol=0 → all-ones masks, blended by
+                    # frame-wise coverage below — see note on multi-stride.)
                     left_ol = 0
                     right_ol = 0
                     if i > 0:
@@ -323,8 +330,13 @@ def _build_context_window_wrapper(
                     left_ol = min(left_ol, tw)
                     right_ol = min(right_ol, tw)
                 else:
-                    # uniform_*: multi-window interleaving — use uniform
-                    # weights normalised by frame-wise coverage later.
+                    # uniform_*: multi-stride windows are NOT simple temporal
+                    # neighbours (a stride-4 window overlaps 60 frames of its
+                    # "neighbour" in index space).  Per-edge ramps on such
+                    # sparse windows distort the blend and REGRESS seams, so we
+                    # keep all-ones masks and let frame-wise coverage handle the
+                    # partition of unity.  Rolled-over windows still get a
+                    # *looped* crossfade when they use ramps (static/segment).
                     left_ol = 0
                     right_ol = 0
                 mask_temporal = create_window_mask(
@@ -333,6 +345,7 @@ def _build_context_window_wrapper(
                     context_overlap=overlap_latent,
                     left_overlap=left_ol,
                     right_overlap=right_ol,
+                    looped=does_window_roll_over(w, T)[0],
                     window_type=fuse_method,
                 )
                 if mask_temporal.dim() == 4:
@@ -354,8 +367,10 @@ def _build_context_window_wrapper(
             buf_counter.zero_()
 
         # For uniform_* schedulers, 3+ windows may overlap at the same
-        # frame (different strides).  The per-edge mask can't handle
-        # >2-way overlaps.  Normalise by simple frame-wise coverage.
+        # frame (different strides).  Per-edge ramps can't handle >2-way
+        # overlaps on sparse multi-stride windows, so those use all-ones
+        # masks blended by simple frame-wise coverage (a partition of unity:
+        # every frame is divided by the count of windows covering it).
         if not is_static:
             coverage = torch.zeros(B, 1, T, 1, 1, device=x.device, dtype=torch.float32)
             for w_idx in windows_list:

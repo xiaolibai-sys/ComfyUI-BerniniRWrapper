@@ -35,6 +35,21 @@ def does_window_roll_over(window: list[int], num_frames: int) -> tuple[bool, int
     return False, -1
 
 
+def _ramp(n: int, device, smooth: bool = True):
+    """Build a 0→1 ramp of length *n* along the temporal axis (dim=1).
+
+    With *smooth* (default) the ramp is smoothstep-eased (``3t²-2t³``), which
+    is C1-continuous: the slope is zero at both ends, so the crossfade has no
+    visible slope discontinuity — the transition band that reads as a brightness
+    "bump"/graying at window seams is strongly attenuated versus raw linear.
+    Partition of unity is preserved either way.
+    """
+    t = torch.linspace(0, 1, n, device=device, dtype=torch.float32)
+    if smooth:
+        t = 3 * t ** 2 - 2 * t ** 3
+    return t.view(1, -1, 1, 1)
+
+
 def shift_window_to_start(window: list[int], num_frames: int):
     """Shift window so its first element is 0 (modulo num_frames)."""
     start_val = window[0]
@@ -280,13 +295,12 @@ def create_window_mask(
     else:
         window_mask = torch.ones(
             noise_pred_context.shape, dtype=torch.float32, device=device)
+        smooth = (window_type == "smooth")
         if (min(c) > 0 or (looped and max(c) == latent_video_length - 1)) and lo > 0:
-            ramp_up = torch.linspace(0, 1, lo, device=device,
-                                     dtype=torch.float32).view(1, -1, 1, 1)
+            ramp_up = _ramp(lo, device, smooth)
             window_mask[:, :lo] = ramp_up
         if (max(c) < latent_video_length - 1 or (looped and min(c) == 0)) and ro > 0:
-            ramp_down = torch.linspace(1, 0, ro, device=device,
-                                       dtype=torch.float32).view(1, -1, 1, 1)
+            ramp_down = 1.0 - _ramp(ro, device, smooth)
             # Use minimum so short windows (tw < lo+ro) don't lose the
             # left ramp to an overwrite.
             window_mask[:, -ro:] = torch.minimum(window_mask[:, -ro:], ramp_down)

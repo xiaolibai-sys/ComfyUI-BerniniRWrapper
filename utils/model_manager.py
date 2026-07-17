@@ -163,27 +163,24 @@ class BerniniRModelHandle:
     # Public API
     # ------------------------------------------------------------------
 
-    def load(self, block_swap: bool | None = None) -> Any:
+    def load(self, block_swap_config: Any = None) -> Any:
         """Load the model from disk, apply LoRAs/compile, and return patcher.
 
-        The returned object is a ComfyUI ``ModelPatcher`` that can be used with
-        ``prepare_sampling`` and the rest of the existing sampling code.  The
-        difference is that *we* decide when it is created and destroyed.
+        *block_swap_config* is a ``BerniniBlockSwap`` dataclass (or ``None``
+        to disable block swap).  Controls both the memory-ownership model and
+        the loading strategy:
 
-        *block_swap* selects the memory-ownership model:
-
-        - ``True``  — the weights are the single source of truth on the offload
-          device (CPU).  The patcher's ``load_device`` is set equal to the
-          offload device so ComfyUI's executor never hoists the whole model
-          onto the GPU first; ``BlockSwapManager`` then windows a slice onto
-          the GPU during the forward pass.  GPU + CPU together hold exactly one
-          copy of the model.
-        - ``False`` — the whole model lives on the GPU (one copy), the standard
-          ComfyUI behaviour.
+        - ``block_swap_config.block_to_swap > 0`` → block swap ON:
+          weights live on CPU, ``BlockSwapManager`` slides a window onto GPU.
+          ``block_swap_config.lazy`` selects streaming (on-demand disk reads)
+          vs full (all weights loaded at startup).
+        - ``block_swap_config is None or block_to_swap <= 0`` → block swap
+          OFF: the whole model lives on GPU (standard ComfyUI behaviour).
         """
-        if block_swap is None:
-            block_swap = self.block_swap
+        block_swap = (block_swap_config is not None
+                      and block_swap_config.block_to_swap > 0)
         self.block_swap = block_swap
+        lazy = block_swap_config.lazy if block_swap_config is not None else False
 
         # 1. Module-level cache — cross-execution reuse
         cache_key = _make_cache_key(
@@ -222,7 +219,18 @@ class BerniniRModelHandle:
         # 1. Build model options (attention backend override).
         model_opts = self._build_model_options()
 
-        # 2. Build the model.  For .safetensors we use a streaming loader that
+        # 2. In block-swap mode, create the RandomAccessBlockReader so the
+        #    streaming loader skips block weights and defers to
+        #    BlockSwapManager's _DiskPrefetcher for on-demand disk reads.
+        _reader = None
+        if block_swap:
+            from ..utils.block_reader import RandomAccessBlockReader
+            _reader = RandomAccessBlockReader(
+                self.model_path,
+                lora_specs=self.lora_specs or None,
+            )
+
+        # 3. Build the model.  For .safetensors we use a streaming loader that
         #    never holds the full state dict in RAM, so the load peak drops
         #    from ~2x model size to ~1x model size + one block group.
         from ..models.wan_model import load_bernini_model
@@ -232,6 +240,8 @@ class BerniniRModelHandle:
             state_dict=None,
             lora_specs=self.lora_specs or None,
             block_swap=block_swap,
+            lazy=lazy,
+            block_reader=_reader,
         )
 
         # 3. Set device targets.
@@ -248,6 +258,13 @@ class BerniniRModelHandle:
             patcher.load_device = patcher.offload_device
         else:
             patcher.load_device = mm.get_torch_device()
+
+        # Store the full block swap config on the diffusion model so the
+        # forward pass can read it directly instead of going through
+        # ``transformer_options``.
+        dm = getattr(patcher.model, "diffusion_model", None)
+        if dm is not None:
+            dm._block_swap_config = block_swap_config
 
         # 4. torch.compile if requested.
         if self.compile_cfg and self.compile_cfg.get("mode", "none") != "none":
@@ -280,11 +297,35 @@ class BerniniRModelHandle:
 
         patcher = self._model_patcher
 
-        # 0. Shrink all parameter tensors to zero-size before ComfyUI's unload.
+        # 0. Close block reader (disk fd) if in lazy mode.
+        base_model = getattr(patcher, "model", None)
+        dm = getattr(base_model, "diffusion_model", None)
+        if dm is not None:
+            _reader = getattr(dm, '_block_reader', None)
+            if _reader is not None:
+                try:
+                    _reader.close()
+                except Exception:
+                    pass
+                try:
+                    delattr(dm, '_block_reader')
+                except Exception:
+                    pass
+
+        # 1. Shrink all parameter tensors to zero-size before ComfyUI's unload.
         #    mm.unload_model_and_clones only offloads to CPU — the PyTorch CPU
         #    allocator never returns pages to the OS on Windows.
         from .vram import release_model_ram as _release_model_ram
         _release_model_ram(patcher)
+
+        # 1b. Evict this patcher from the module-level cache so the next
+        #     load() rebuilds a *fresh* model instead of reusing a patcher
+        #     whose parameters were just shrunk to zero-size (1-D) tensors.
+        #     Without this, load()'s cache hit returns the corpse and the
+        #     forward pass crashes with "mat2 must be a matrix, got 1-D
+        #     tensor" (e.g. text_embedding's F.linear).  The dual-expert path
+        #     already evicts its high patcher the same way right after freeing.
+        _cache_evict_patcher(patcher)
 
         # 1. Evict block-swap blocks before dropping the model so in-flight
         #    async transfers don't touch freed memory.  shutdown() cancels any

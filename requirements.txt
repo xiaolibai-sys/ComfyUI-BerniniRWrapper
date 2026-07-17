@@ -3,3 +3,11 @@
 numpy>=1.21.0
 einops>=0.6.0
 tqdm>=4.60.0
+
+# Windows-only: enables lock-free, true-parallel positioned disk reads
+# (win32file.ReadFile + OVERLAPPED) used by utils/block_reader.py. The
+# platform marker is MANDATORY — pywin32 has no non-Windows wheels, so an
+# unconditional entry would break `pip install` on Linux/macOS. On POSIX the
+# code path uses os.pread instead; without pywin32 on Windows it falls back
+# to a per-fd locked lseek+read (correct, just serializes the prefetch workers).
+pywin32>=306 ; sys_platform == "win32"
