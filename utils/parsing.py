@@ -8,7 +8,6 @@ share the same interpretation of user inputs.
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 from .types import GuidanceMode
 
@@ -30,7 +29,7 @@ def parse_guidance_mode(mode: str | GuidanceMode) -> GuidanceMode:
     normalised = str(mode).strip().upper().replace("-", "_")
     try:
         return GuidanceMode(normalised)
-    except ValueError as exc:
+    except ValueError:
         logger.warning(
             "[BerniniR] Unknown guidance mode %r; falling back to CFG.",
             mode,

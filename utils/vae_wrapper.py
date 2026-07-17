@@ -14,9 +14,7 @@ import logging
 import torch
 import comfy.model_management as mm
 import comfy.utils
-import folder_paths
 
-from . import vram
 from .wanvideo_vae import WanVideoVAE, WanVideoVAE38
 
 logger = logging.getLogger(__name__)

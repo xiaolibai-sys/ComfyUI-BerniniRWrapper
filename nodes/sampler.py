@@ -19,11 +19,8 @@ When context_options is NOT connected:
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
-import numpy as np
 import torch
-import comfy.model_management as mm
 import comfy.sample
 import comfy.samplers
 import comfy.utils
@@ -48,11 +45,6 @@ from ..utils.types import (
 )
 from ..utils.teacache import (
     TeaCache,
-    DEFAULT_START_BLOCK,
-    DEFAULT_MAX_SKIP_BLOCKS,
-    DEFAULT_REL_L1_THRESH,
-    DEFAULT_WARMUP_STEPS,
-    DEFAULT_COOLDOWN_STEPS,
 )
 
 logger = logging.getLogger(__name__)
@@ -395,7 +387,6 @@ def _build_context_window_wrapper(
             # reference frames.  Single-frame latents (reference_images)
             # are left untouched so they remain global references.
             c_win = dict(c)  # shallow copy — other windows need original
-            win_len = len(w)
 
             context_latents = c_win.get('context_latents', None)
             if context_latents is not None:
@@ -609,7 +600,7 @@ class BerniniR_KSampler:
         _tc = None
         _tc_detach = None
         if teacache_args is not None:
-            patcher = model_handle.load()
+            patcher = model_handle.load(block_swap_config=block_swap_args)
             batch = latent_samples.shape[0]
             _tc = TeaCache(
                 patcher,

@@ -16,7 +16,6 @@ any future subclass.
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 import torch
 

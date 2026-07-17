@@ -27,7 +27,6 @@ from .types import (
     BerniniContext,
     BerniniGuidanceConfig,
     Conditioning,
-    GuidanceMode,
 )
 
 logger = logging.getLogger(__name__)
@@ -194,11 +193,10 @@ class InjectionContext:
         extra_model_options: dict,
         inner_model,
     ) -> None:
-        """Inject block-swap config and disable torch.compile if needed.
+        """Disable torch.compile if block swap is active (incompatible).
 
-        Must be called *after* :meth:`apply_options` and *after*
-        ``model.pre_run()`` because it needs access to the inner model to
-        compute ``blocks_on_gpu`` and check for ``_original_transformer_forward``.
+        The ``BlockSwapManager`` itself reads config from ``_block_swap_config``
+        on the diffusion model, not from transformer_options.
         """
         if self.block_to_swap <= 0:
             return
@@ -208,8 +206,6 @@ class InjectionContext:
         if total_blocks <= 0:
             return
 
-        blocks_on_gpu = max(1, total_blocks - self.block_to_swap)
-
         # Dynamic GPU↔CPU block loading breaks the traced graph.
         _orig = getattr(dm, "_original_transformer_forward", None)
         if _orig is not None:
@@ -218,10 +214,6 @@ class InjectionContext:
                 "[BerniniR] Block swap is incompatible with "
                 "torch.compile — compile disabled for this run."
             )
-
-        extra_model_options.setdefault("transformer_options", {}).update({
-            "_block_swap": True,
-        })
 
     def apply_noise(
         self,

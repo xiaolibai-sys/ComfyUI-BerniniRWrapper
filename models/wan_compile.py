@@ -161,7 +161,6 @@ _inductor_config.cpp_wrapper = False
 # package's compiled-graph contract changes (a version sentinel) or (b) the user
 # explicitly asks via BERNINI_PURGE_COMPILE_CACHE.
 import tempfile as _tempfile
-import torch._inductor.codecache as _codecache
 import shutil as _shutil
 
 # Bump when a code change invalidates previously compiled graphs (e.g. the

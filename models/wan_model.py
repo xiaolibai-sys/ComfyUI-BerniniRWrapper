@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import math
 import logging
-from typing import Optional
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -480,7 +480,8 @@ class BerniniRWanModel(nn.Module):
         t_start: int = kwargs.pop('_rope_t_start', 0) if kwargs else 0
         ntk_scale: float = kwargs.pop('_rope_ntk_scale', 1.0) if kwargs else 1.0
 
-        # ── Block swap: create manager early so pre_forward can use it ──
+        # ── Block swap: create manager early so the forward pass can
+        #     use it.  Only active when ``block_to_swap > 0``.
         _bswap = None
         cfg: Any = getattr(self, '_block_swap_config', None)
         if cfg is not None and cfg.block_to_swap > 0:
@@ -504,7 +505,6 @@ class BerniniRWanModel(nn.Module):
 
         # ── NAG context projection ────────────────────────────────
         # Track whether transformer_options was already cloned by NAG
-        _orig_topt = transformer_options
         if 'nag_context' in transformer_options:
             nag_ctx = transformer_options['nag_context']
             if nag_ctx is not None:
@@ -648,22 +648,23 @@ class BerniniRWanModel(nn.Module):
 
         # ── Block swap: GPU↔RAM offloading ───────────────────────────
         _bswap = kwargs.get("_block_swap_mgr")
-        cfg: Any = getattr(self, '_block_swap_config', None)
-        if _bswap is None and cfg is not None and cfg.block_to_swap > 0:
-            from ..utils.block_swap import BlockSwapManager
-            total = len(self.blocks) if hasattr(self, 'blocks') else 0
-            window = max(1, total - cfg.block_to_swap)
-            _bswap = getattr(self, '_block_swap_mgr', None)
-            if _bswap is None or _bswap.window != window:
-                _bswap = BlockSwapManager(
-                    self,
-                    window_size=window,
-                    prefetch=cfg.prefetch,
-                    prefetch_count=cfg.prefetch_count,
-                    pin_memory=cfg.pin_memory,
-                    block_reader=getattr(self, '_block_reader', None),
-                )
-                self._block_swap_mgr = _bswap
+        if _bswap is None:
+            cfg: Any = getattr(self, '_block_swap_config', None)
+            if cfg is not None and cfg.block_to_swap > 0:
+                from ..utils.block_swap import BlockSwapManager
+                total = len(self.blocks) if hasattr(self, 'blocks') else 0
+                window = max(1, total - cfg.block_to_swap)
+                _bswap = getattr(self, '_block_swap_mgr', None)
+                if _bswap is None or _bswap.window != window:
+                    _bswap = BlockSwapManager(
+                        self,
+                        window_size=window,
+                        prefetch=cfg.prefetch,
+                        prefetch_count=cfg.prefetch_count,
+                        pin_memory=cfg.pin_memory,
+                        block_reader=getattr(self, '_block_reader', None),
+                    )
+                    self._block_swap_mgr = _bswap
 
         # Patch embedding — matches upstream: x.float() ensures float32
         # Conv3d accumulation (patch_embedding weights are float32).
@@ -1056,7 +1057,7 @@ class _SafetensorsFileReader:
         straight from the safetensors ``data_offsets`` and the element
         count from ``shape``.  Used by the lazy block-swap loader so it can
         record per-block VRAM/byte estimates without pulling the whole
-        (~28 GB for 14B) checkpoint through host RAM just to count bytes.
+        checkpoint through host RAM just to count bytes.
         """
         info = self._header[key]
         start, end = info["data_offsets"]
@@ -1088,7 +1089,7 @@ def _build_streaming_lora_groups(lora_specs):
     """Load all LoRAs and group A/B/alpha by canonical base weight key."""
     if not lora_specs:
         return {}
-    from ..utils.lora import standardize_lora_keys, load_lora_state_dict
+    from ..utils.lora import load_lora_state_dict
     groups = {}
     for lora_path, strength in lora_specs:
         if strength == 0.0:
@@ -1262,7 +1263,7 @@ def _detect_model_config(lookup_shape, *, keys=None, has_dtype=None):
                 continue
             weight_dtype = dt
             if dt in (torch.float8_e4m3fn, torch.float8_e5m2):
-                quantization = f"fp8_e4m3fn" if dt == torch.float8_e4m3fn else "fp8_e5m2"
+                quantization = "fp8_e4m3fn" if dt == torch.float8_e4m3fn else "fp8_e5m2"
                 break
 
     if is_scaled_fp8 and quantization:
@@ -1304,7 +1305,6 @@ def _load_bernini_model_safetensors_streaming(
     the model, we read one block group at a time.  Peak host RAM drops from
     ~2x the model size to roughly the model size plus one block group.
     """
-    import math
     import comfy.model_patcher
     import comfy.utils
 
@@ -1415,8 +1415,8 @@ def _load_bernini_model_safetensors_streaming(
             # (the _DiskPrefetcher reads them on demand during sampling).  We
             # only need per-block byte/param counts for the VRAM estimate, so
             # take them from the header instead of reading the full tensor —
-            # this avoids a pointless ~28 GB (14B bf16) sequential disk read
-            # that otherwise dominates load time (~25 s).
+            # this avoids a pointless sequential disk read of the full 14B
+            # checkpoint that otherwise dominates load time (~25 s).
             is_block_key = len(parts) >= 2 and parts[0] == 'blocks'
             if lazy and block_swap and is_block_key:
                 group[target_key] = f.tensor_meta(raw_key)  # (nbytes, numel)
@@ -1479,7 +1479,7 @@ def _load_bernini_model_safetensors_streaming(
         _verify_weights_loaded(dm, skip_blocks=False)
 
     mode = "lazy" if lazy else "eager"
-    logger.info("[BerniniR] Stream-loaded (%s): dim=%(dim)d heads=%(num_heads)d "
+    logger.info("[BerniniR] Stream-loaded (%(mode)s): dim=%(dim)d heads=%(num_heads)d "
                 "layers=%(num_layers)d ffn=%(ffn_dim)d "
                 "variant=%(model_variant)s quant=%(quant)s",
                 {"mode": mode,
@@ -1585,8 +1585,8 @@ def _materialize_block_weight_slots(dm):
     (-> 0 offload memory, no crash) without allocating host RAM and without
     turning ``weight`` into a registered Parameter (which would change the
     ``load_state_dict`` path that fills the real fp8 weights on demand via
-    ``BlockDiskSource.load_block``).  The real weights are still materialised
-    later, on first GPU move.
+    the block reader (``RandomAccessBlockReader`` / ``_DiskPrefetcher``).  The real
+    weights are still materialised later, on first GPU move.
     """
     for block in getattr(dm, "blocks", []):
         for m in block.modules():

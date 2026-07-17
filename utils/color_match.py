@@ -260,8 +260,6 @@ def _mvgd(
     ref_flat = ref_image.reshape(-1, C).float()
 
     # ── Subsample for covariance if needed ──────────────────────────
-    n_src = src_flat.shape[0]
-    n_ref = ref_flat.shape[0]
     src_for_stats = _subsample(src_flat, max_pixels)
     ref_for_stats = _subsample(ref_flat, max_pixels)
 

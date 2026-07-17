@@ -25,10 +25,8 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Optional
 
 import torch
-import comfy.model_management as mm
 import folder_paths
 
 from ..utils.types import SegmentSpec, EncodedSegment

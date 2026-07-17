@@ -42,7 +42,7 @@ class _LatentFormatProxy:
 
 
 # ---------------------------------------------------------------------------
-# Module-level model cache — avoids ~2.6 GB disk read + full build on re-runs
+# Module-level model cache — avoids a full checkpoint disk read + build on re-runs
 # ---------------------------------------------------------------------------
 _MAX_MODEL_CACHE: int = 1
 _model_cache: OrderedDict[str, Any] = OrderedDict()
@@ -167,20 +167,16 @@ class BerniniRModelHandle:
         """Load the model from disk, apply LoRAs/compile, and return patcher.
 
         *block_swap_config* is a ``BerniniBlockSwap`` dataclass (or ``None``
-        to disable block swap).  Controls both the memory-ownership model and
-        the loading strategy:
-
-        - ``block_swap_config.block_to_swap > 0`` → block swap ON:
-          weights live on CPU, ``BlockSwapManager`` slides a window onto GPU.
-          ``block_swap_config.lazy`` selects streaming (on-demand disk reads)
-          vs full (all weights loaded at startup).
-        - ``block_swap_config is None or block_to_swap <= 0`` → block swap
-          OFF: the whole model lives on GPU (standard ComfyUI behaviour).
+        to disable block swap).  When present, the model always goes through
+        ``BlockSwapManager`` (ring buffer + ``SlotEntry``) for GPU placement,
+        regardless of ``block_to_swap``.  When ``block_to_swap > 0``, extra
+        blocks are offloaded to CPU/disk.
         """
-        block_swap = (block_swap_config is not None
-                      and block_swap_config.block_to_swap > 0)
-        self.block_swap = block_swap
-        lazy = block_swap_config.lazy if block_swap_config is not None else False
+        has_config = block_swap_config is not None
+        need_swap = has_config and block_swap_config.block_to_swap > 0
+        self.block_swap = need_swap
+        block_swap = need_swap
+        lazy = block_swap_config.lazy if need_swap else False
 
         # 1. Module-level cache — cross-execution reuse
         cache_key = _make_cache_key(
@@ -193,19 +189,25 @@ class BerniniRModelHandle:
             _model_cache.move_to_end(cache_key)  # LRU bump
             self._model_patcher = cached
             logger.info("[BerniniR] Cache hit: %s", cache_key[:8])
-            if block_swap:
-                # Block swap owns the GPU: keep the model on the offload device
-                # (CPU).  Moving the whole model to the GPU here would create a
-                # second full copy and race BlockSwapManager's transfers.
+            if need_swap:
+                # BlockSwapManager owns GPU placement — keep on offload device.
                 cached.load_device = cached.offload_device
+                # Ensure _block_swap_config is set on the model (may be missing
+                # if the cached patcher predates the unified config path).
+                dm = getattr(cached.model, "diffusion_model", None)
+                if dm is not None and not hasattr(dm, '_block_swap_config'):
+                    dm._block_swap_config = block_swap_config
             else:
                 mm.load_models_gpu([cached])
             return cached
 
         # 2. Guard: handle still holds a loaded patcher (not yet unloaded)
         if self._model_patcher is not None:
-            if block_swap:
+            if need_swap:
                 self._model_patcher.load_device = self._model_patcher.offload_device
+                dm = getattr(self._model_patcher.model, "diffusion_model", None)
+                if dm is not None and not hasattr(dm, '_block_swap_config'):
+                    dm._block_swap_config = block_swap_config
             else:
                 mm.load_models_gpu([self._model_patcher])
             return self._model_patcher
@@ -222,8 +224,9 @@ class BerniniRModelHandle:
         # 2. In block-swap mode, create the RandomAccessBlockReader so the
         #    streaming loader skips block weights and defers to
         #    BlockSwapManager's _DiskPrefetcher for on-demand disk reads.
+        #    Only needed when blocks are actually offloaded (block_to_swap > 0).
         _reader = None
-        if block_swap:
+        if has_config and block_swap_config.block_to_swap > 0:
             from ..utils.block_reader import RandomAccessBlockReader
             _reader = RandomAccessBlockReader(
                 self.model_path,
@@ -239,31 +242,28 @@ class BerniniRModelHandle:
             model_options=model_opts,
             state_dict=None,
             lora_specs=self.lora_specs or None,
-            block_swap=block_swap,
+            block_swap=need_swap,
             lazy=lazy,
             block_reader=_reader,
         )
 
         # 3. Set device targets.
-        #    - Block swap ON: the weights are the single source of truth on the
-        #      offload device (CPU).  BlockSwapManager moves only a sliding
-        #      window onto the GPU during the forward pass, so GPU + CPU
-        #      together hold exactly ONE copy of the weights (never two).  We
-        #      therefore set load_device == offload_device so ComfyUI's
-        #      executor never moves the whole model onto the GPU first.
-        #    - Block swap OFF: the whole model lives on the GPU (one copy), the
-        #      standard ComfyUI behaviour.
+        #    - Block swap config present: the model goes through
+        #      BlockSwapManager (ring buffer + SlotEntry).  We set
+        #      load_device == offload_device so ComfyUI's executor never
+        #      hoists the whole model onto the GPU first (that would create
+        #      a second full copy and race BlockSwapManager's transfers).
+        #    - No config: standard ComfyUI behaviour (model on GPU).
         patcher.offload_device = mm.unet_offload_device()
-        if block_swap:
+        if need_swap:
             patcher.load_device = patcher.offload_device
         else:
             patcher.load_device = mm.get_torch_device()
 
         # Store the full block swap config on the diffusion model so the
-        # forward pass can read it directly instead of going through
-        # ``transformer_options``.
+        # forward pass can read it directly (only when block swap is active).
         dm = getattr(patcher.model, "diffusion_model", None)
-        if dm is not None:
+        if dm is not None and need_swap:
             dm._block_swap_config = block_swap_config
 
         # 4. torch.compile if requested.

@@ -4,7 +4,7 @@ A self-contained ComfyUI custom node package for **ByteDance's Bernini-R (1.3B /
 
 > **For developers and maintainers:** see [`README_DEVELOPER.md`](./README_DEVELOPER.md) for entry points, key functions, data flow, and common modification scenarios.
 
-Bernini-R is a renderer-only diffusion model fine-tuned from **Wan2.1-T2V-1.3B**/**Wan 2.2-A14B**. It retains the T2V architecture but adds in-context conditioning, enabling a single lightweight checkpoint (~2.6 GB) to perform both generation and editing tasks: text-to-video, image-to-video, video-to-video editing, reference-guided editing, and subject-to-video.
+Bernini-R is a renderer-only diffusion model fine-tuned from **Wan2.1-T2V-1.3B**/**Wan 2.2-A14B**. It retains the T2V architecture but adds in-context conditioning, enabling a single checkpoint to perform both generation and editing tasks: text-to-video, image-to-video, video-to-video editing, reference-guided editing, and subject-to-video.
 
 This package embeds model loading, VAE, temporal context windows, attention backends, TeaCache, NAG, a seven-mode guidance family, and dynamic guidance scheduling in one place.
 
@@ -146,13 +146,13 @@ ComfyUI-BerniniR uses the standard ComfyUI model folders.
 
 | Component | Folder | Typical Files |
 |---|---|---|
-| Diffusion model | `ComfyUI/models/diffusion_models/` | `Bernini-R-1.3B*.safetensors` |
+| Diffusion model | `ComfyUI/models/diffusion_models/` | `Bernini-R-1.3B*.safetensors` (1.3B) / `Bernini-R-14B*.safetensors` (14B) |
 | Text encoder | `ComfyUI/models/text_encoders/` | Wan T5-XXL `.safetensors` |
 | VAE | `ComfyUI/models/vae/` | Wan 16-channel VAE `.safetensors` |
 
 ### Diffusion model
 
-- **1.3B:** `ByteDance/Bernini-R-1.3B-Diffusers` converted to ComfyUI-compatible `.safetensors`. Based on **Wan2.1-T2V-1.3B**, single-expert (non-MoE), ~2.6 GB checkpoint.
+- **1.3B:** `ByteDance/Bernini-R-1.3B-Diffusers` converted to ComfyUI-compatible `.safetensors`. Based on **Wan2.1-T2V-1.3B**, single-expert (non-MoE) checkpoint.
 - **14B:** The 14B Bernini-R variant also loads through the same nodes. Based on the larger Wan 2.2-A14B backbone.
 - Standard Wan / Wan 2.1 diffusion models may also load, but I have been not testing it.
 
@@ -290,7 +290,7 @@ Spatiotemporal Skip Guidance uses a weak model obtained by skipping self-attenti
 | Parameter | Default | Description |
 |---|---|---|
 | `stg_scale` | 1.0 | Guidance strength. Range 0.0–10.0. |
-| `stg_block_idx` | `"10,20,27"` | Comma-separated block indices for self-attention skip. Wan 1.3B has 30 layers (0–29). |
+| `stg_block_idx` | `"10,20,27"` | Comma-separated block indices for self-attention skip. Wan 1.3B has 30 layers (0–29); the 14B variant has 40 layers (0–39). |
 
 - **STG_A**: at marked blocks, the self-attention output is set to zero.
 - **STG_R**: the self-attention residual is skipped while `x` is preserved unchanged.

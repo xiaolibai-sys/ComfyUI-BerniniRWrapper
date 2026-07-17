@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Any, Optional
+from typing import Any
 
 import torch
 import comfy.model_management
@@ -34,10 +34,8 @@ import comfy.sampler_helpers
 from comfy.samplers import get_area_and_mult, cond_cat
 
 from ..utils.model_manager import BerniniRModelHandle, _cache_evict_patcher
-from ..utils.vram import collect_garbage, log_memory, release_model_ram, log_system_ram
+from ..utils.vram import collect_garbage, release_model_ram, log_system_ram
 from ..utils.types import (
-    BerniniContext,
-    BerniniBlockSwap,
     BerniniGuidanceConfig,
     Conditioning,
     EncodedSegment,
@@ -793,7 +791,6 @@ def bernini_sample(
     device = model.load_device
 
     inj: InjectionContext | None = None
-    _prev_cw = None
     try:
         # ── process_conds ──────────────────────────────────────────
         latent_for_conds = latent_samples.to(device=device, dtype=torch.float32)
