@@ -12,7 +12,6 @@ Supports:
 
 from __future__ import annotations
 
-import logging
 import math
 from typing import Optional
 
@@ -24,9 +23,9 @@ import node_helpers
 
 from ..utils.vram import inference_mode, log_memory, collect_garbage
 
-logger = logging.getLogger(__name__)
+from ..utils.log import get_logger as _get_logger
 
-
+logger = _get_logger("Cond")
 # ---------------------------------------------------------------------------
 # Image / video preprocessing
 # ---------------------------------------------------------------------------
@@ -125,7 +124,7 @@ def _encode_video_chunked(
     overlap_lat = temporal_overlap // 4
 
     logger.info(
-        f"[BerniniR] Chunked VAE encode: {F} frames → "
+        f"Chunked VAE encode: {F} frames → "
         f"{math.ceil(F / stride)} chunks of ≤{chunk_frames}"
         f" (overlap={temporal_overlap}px / {overlap_lat}lat)"
     )
@@ -302,13 +301,13 @@ class BerniniR_Conditioning:
             src = source_video
             if src.shape[0] < length:
                 logger.info(
-                    "[BerniniR] source_video has %d frames < length=%d; "
+                    "source_video has %d frames < length=%d; "
                     "using all available frames as in-context reference "
                     "(no loop-pad, matching official BerniniConditioning).",
                     src.shape[0], length,
                 )
             logger.info(
-                f"[BerniniR] Encoding source_video: "
+                f"Encoding source_video: "
                 f"shape={list(src.shape)}, chunks≤{chunk_frames}"
             )
             source_resized = comfy.utils.common_upscale(
@@ -325,12 +324,12 @@ class BerniniR_Conditioning:
             ref = reference_video
             if ref.shape[0] < length:
                 logger.info(
-                    "[BerniniR] reference_video has %d frames < length=%d; "
+                    "reference_video has %d frames < length=%d; "
                     "using all available frames as in-context reference.",
                     ref.shape[0], length,
                 )
             logger.info(
-                f"[BerniniR] Encoding reference_video: "
+                f"Encoding reference_video: "
                 f"shape={list(ref.shape)}"
             )
             ref_resized = _resize_long_edge(ref[:length, :, :, :3], ref_max_size)
@@ -341,7 +340,7 @@ class BerniniR_Conditioning:
         if reference_images is not None:
             n_imgs = reference_images.shape[0]
             logger.info(
-                f"[BerniniR] Encoding {n_imgs} reference_images: "
+                f"Encoding {n_imgs} reference_images: "
                 f"shape={list(reference_images.shape)}"
             )
             for i in range(n_imgs):
@@ -353,7 +352,7 @@ class BerniniR_Conditioning:
         # ── Attach context_latents to conditioning ───────────────────
         if context_latents:
             logger.info(
-                f"[BerniniR] Attaching {len(context_latents)} context_latents "
+                f"Attaching {len(context_latents)} context_latents "
                 f"to conditioning (batch_size={batch_size})."
             )
             # Duplicate context_latents across batch dim if batch_size > 1
@@ -375,7 +374,7 @@ class BerniniR_Conditioning:
         if mask is not None:
             if source_video is None:
                 logger.warning(
-                    "[BerniniR] mask connected but no source_video provided; "
+                    "mask connected but no source_video provided; "
                     "edit_mask requires source_video as the background source."
                 )
             else:

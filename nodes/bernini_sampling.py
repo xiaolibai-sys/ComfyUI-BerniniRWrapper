@@ -21,7 +21,6 @@ Existing features that work *through* the model unchanged:
 
 from __future__ import annotations
 
-import logging
 import math
 from typing import Any
 
@@ -48,9 +47,9 @@ from ..utils.injection import InjectionContext
 # so there is no circular-import cycle.
 from .sampler import _build_context_window_wrapper
 
-logger = logging.getLogger(__name__)
+from ..utils.log import get_logger as _get_logger
 
-
+logger = _get_logger("Sampler")
 def _resample_schedule(values: list[float], target_steps: int) -> list[float]:
     """Linearly resample a guidance schedule to *target_steps*.
 
@@ -236,7 +235,7 @@ class BerniniModelWrapper:
                 x = src_noisy * keep + x * (1.0 - keep)
             else:
                 logger.warning(
-                    "[BerniniR] Differential diffusion skipped: "
+                    "Differential diffusion skipped: "
                     "source shape %s does not match latent shape %s.",
                     list(src0.shape), list(x.shape),
                 )
@@ -456,7 +455,7 @@ class DualExpertModelWrapper:
     def __call__(self, x, sigma, **extra_args):
         if self._step >= self._split and not self._switched:
             logger.info(
-                "[BerniniR] Dual-expert split at step %d: unloading high, loading low.",
+                "Dual-expert split at step %d: unloading high, loading low.",
                 self._step,
             )
             # Cancel any in-flight high-model prefetches before VRAM pressure
@@ -470,7 +469,7 @@ class DualExpertModelWrapper:
                         _mgr.evict_all()
                     except Exception as e:
                         logger.warning(
-                            "[BerniniR] High block-swap evict before switch failed: %s",
+                            "High block-swap evict before switch failed: %s",
                             e,
                         )
             self._low = self._low_factory()
@@ -1086,7 +1085,7 @@ def bernini_sample_dual(
         nonlocal high_patcher, high_inner, high_wrapper
 
         logger.info(
-            "[BerniniR] Dual-expert split: fully releasing high-noise model before loading low.",
+            "Dual-expert split: fully releasing high-noise model before loading low.",
         )
 
         # 1. Restore the high model's original shift before we drop it, so the
@@ -1109,7 +1108,7 @@ def bernini_sample_dual(
                 try:
                     _mgr.shutdown()
                 except Exception as e:
-                    logger.warning("[BerniniR] High block-swap shutdown failed: %s", e)
+                    logger.warning("High block-swap shutdown failed: %s", e)
 
         # 3. Fully release the high model and drop every local reference so
         #    Python can free the weights *before* the low load peak.  unload()
@@ -1119,7 +1118,7 @@ def bernini_sample_dual(
         try:
             high_model.unload()
         except Exception as e:
-            logger.warning("[BerniniR] High model unload before low load failed: %s", e)
+            logger.warning("High model unload before low load failed: %s", e)
 
         if high_patcher is not None:
             _cache_evict_patcher(high_patcher)

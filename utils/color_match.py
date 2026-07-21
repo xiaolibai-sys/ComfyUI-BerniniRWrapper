@@ -17,13 +17,13 @@ Algorithms
 
 from __future__ import annotations
 
-import logging
 from typing import Optional
 
 import torch
 
-logger = logging.getLogger(__name__)
+from .log import get_logger as _get_logger
 
+logger = _get_logger("ColorMatch")
 COLORMATCH_METHODS = [
     "disabled",
     "mkl",
@@ -73,7 +73,7 @@ def apply_color_match(
         B = total_frames // frames_per_batch
         if B * frames_per_batch != total_frames:
             logger.warning(
-                "[BerniniR] frames_per_batch=%d doesn't divide %d frames; "
+                "frames_per_batch=%d doesn't divide %d frames; "
                 "falling back to single-ref.",
                 frames_per_batch, total_frames,
             )
@@ -125,7 +125,7 @@ def _apply_single_ref(
     if method == "hm-mkl-hm":
         return _pipeline_hm_mkl_hm(pixels, ref_image, blend_strength, max_stat_pixels)
     # Unknown method → reinhard fallback
-    logger.warning("[BerniniR] Unknown method '%s' — using reinhard.", method)
+    logger.warning("Unknown method '%s' — using reinhard.", method)
     return _reinhard(pixels, ref_image, blend_strength)
 
 
@@ -198,7 +198,7 @@ def _reinhard(
     try:
         return _reinhard_lab(pixels, ref_image, blend_strength)
     except ImportError:
-        logger.debug("[BerniniR] kornia not installed; using RGB reinhard.")
+        logger.debug("kornia not installed; using RGB reinhard.")
         return _reinhard_rgb(pixels, ref_image, blend_strength)
 
 

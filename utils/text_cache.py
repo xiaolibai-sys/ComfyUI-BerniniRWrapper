@@ -8,7 +8,6 @@ duplicated encoding of identical prompts across workflow runs.
 from __future__ import annotations
 
 import hashlib
-import logging
 from pathlib import Path
 from typing import Optional
 
@@ -16,8 +15,9 @@ import torch
 import comfy.sd
 import folder_paths
 
-logger = logging.getLogger(__name__)
+from .log import get_logger as _get_logger
 
+logger = _get_logger("TextCache")
 # ---------------------------------------------------------------------------
 # Disk cache
 # ---------------------------------------------------------------------------
@@ -38,7 +38,7 @@ def _evict_oldest_if_needed() -> None:
         while len(files) > _MAX_CACHE_FILES:
             oldest = files.pop(0)
             oldest.unlink(missing_ok=True)
-            logger.debug(f"[BerniniR] Evicted old cache file: {oldest.name}")
+            logger.debug(f"Evicted old cache file: {oldest.name}")
     except Exception:
         pass  # never fail on cache maintenance
 
@@ -64,7 +64,7 @@ def _load_cached_conditioning(prompt: str, tag: str = "") -> Optional[list]:
             return None
         return [[cond, pooled]]
     except Exception as e:
-        logger.warning(f"[BerniniR] Corrupt cache {path.name}: {e}")
+        logger.warning(f"Corrupt cache {path.name}: {e}")
         try:
             path.unlink(missing_ok=True)
         except Exception:
@@ -84,10 +84,10 @@ def _save_cached_conditioning(prompt: str, conditioning: list, tag: str = "") ->
     try:
         path = _cache_path(prompt, tag)
         torch.save({"cond": cond.cpu(), "pooled": safe_pooled}, path)
-        logger.info(f"[BerniniR] Saved text embed cache: {path.name}")
+        logger.info(f"Saved text embed cache: {path.name}")
         _evict_oldest_if_needed()
     except Exception as e:
-        logger.warning(f"[BerniniR] Failed to save cache: {e}")
+        logger.warning(f"Failed to save cache: {e}")
 
 
 # ---------------------------------------------------------------------------

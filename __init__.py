@@ -32,11 +32,12 @@ Registered nodes (19):
   BerniniR_AttentionConfig    — Select attention backend
 """
 
-import logging
 
 from .nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
 
-logger = logging.getLogger(__name__)
-logger.info("[BerniniR] ComfyUI-BerniniR node package loaded successfully.")
+from .utils.log import get_logger as _get_logger
+
+logger = _get_logger("Init")
+logger.info("ComfyUI-BerniniR node package loaded successfully.")
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]

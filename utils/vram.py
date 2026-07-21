@@ -6,16 +6,15 @@ Lightweight helpers wrapping ComfyUI's model_management and PyTorch's CUDA APIs.
 from __future__ import annotations
 
 import gc
-import logging
 
 import torch
 import comfy.model_management as mm
 
 from .tensor_ops import free_module_storage
 
-logger = logging.getLogger(__name__)
+from .log import get_logger as _get_logger
 
-
+logger = _get_logger("VRAM")
 def get_compute_device() -> torch.device:
     """Return ComfyUI's configured compute device."""
     return mm.get_torch_device()
@@ -101,9 +100,9 @@ def log_system_ram(tag: str = "") -> None:
         vm = psutil.virtual_memory()
         label = f" [{tag}]" if tag else ""
         logger.info(
-            "[BerniniR] RAM%s: %.1f / %.1f GiB free (%.1f%% used)",
+            "RAM%s: %.1f / %.1f GiB free (%.1f%% used)",
             label, vm.available / (1024 ** 3), vm.total / (1024 ** 3),
-            100.0 * vm.percent,
+            vm.percent,
         )
     except Exception:
         # psutil not available — fall back to ctypes for a rough number.
@@ -128,7 +127,7 @@ def log_system_ram(tag: str = "") -> None:
             total = ms.ullTotalPhys / (1024 ** 3)
             label = f" [{tag}]" if tag else ""
             logger.info(
-                "[BerniniR] RAM%s: %.1f / %.1f GiB free", label, avail, total)
+                "RAM%s: %.1f / %.1f GiB free", label, avail, total)
         except Exception:
             pass
 
@@ -149,7 +148,7 @@ def release_model_ram(patcher: Any) -> None:
         for module in model.modules():
             free_module_storage(module)
     except Exception as e:
-        logger.warning("[BerniniR] release_model_ram shrink failed: %s", e)
+        logger.warning("release_model_ram shrink failed: %s", e)
     collect_garbage(aggressive=True)
 
 
@@ -162,7 +161,7 @@ def log_memory(tag: str = "") -> None:
         used = (total - free) / (1024 * 1024 * 1024)
         total_gb = total / (1024 * 1024 * 1024)
         label = f" [{tag}]" if tag else ""
-        logger.info(f"[BerniniR] VRAM{label}: {used:.2f} / {total_gb:.2f} GiB used")
+        logger.info(f"VRAM{label}: {used:.2f} / {total_gb:.2f} GiB used")
     except Exception:
         pass
 

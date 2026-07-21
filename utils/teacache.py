@@ -13,13 +13,13 @@ and context-window multi-calls from corrupting the cache.
 
 from __future__ import annotations
 
-import logging
 from typing import Optional
 
 import torch
 
-logger = logging.getLogger(__name__)
+from .log import get_logger as _get_logger
 
+logger = _get_logger("TeaCache")
 # ---------------------------------------------------------------------------
 # Defaults — single source of truth for both the TeaCache engine and the
 # ComfyUI widget definitions in sampler_teacache.py.
@@ -68,7 +68,7 @@ class TeaCache:
         dm = self._get_wan_model(model)
         if dm is None:
             raise RuntimeError(
-                "[BerniniR] TeaCache: cannot locate WanModel on the given model patcher."
+                "TeaCache: cannot locate WanModel on the given model patcher."
             )
 
         n_blocks = len(dm.blocks)
@@ -87,13 +87,13 @@ class TeaCache:
         if _orig_tf is not None:
             self._wan.transformer_forward = _orig_tf
             logger.warning(
-                "[BerniniR] TeaCache is incompatible with torch.compile — "
+                "TeaCache is incompatible with torch.compile — "
                 "compile disabled for this sampling run."
             )
         elif _orig_fo is not None:
             self._wan.forward_orig = _orig_fo
             logger.warning(
-                "[BerniniR] TeaCache is incompatible with torch.compile — "
+                "TeaCache is incompatible with torch.compile — "
                 "compile disabled for this sampling run."
             )
 
@@ -105,7 +105,7 @@ class TeaCache:
         self._batch_gt_1 = batch_size > 1
         if self._batch_gt_1:
             logger.warning(
-                "[BerniniR] TeaCache batch_size=%d > 1: comparing only "
+                "TeaCache batch_size=%d > 1: comparing only "
                 "batch[0:1] for cache decisions.", batch_size
             )
 
@@ -162,7 +162,7 @@ class TeaCache:
         self._active_cached_output = None
         self._wan = None
         self._patched = False
-        logger.info("[BerniniR] TeaCache detached.")
+        logger.info("TeaCache detached.")
 
     # ------------------------------------------------------------------
     # Internal
@@ -191,7 +191,7 @@ class TeaCache:
             blk.forward = self._hook(blk, i)
         self._patched = True
         logger.info(
-            "[BerniniR] TeaCache: blocks [%d, %d) of %d, thresh=%.3f, warmup=%d",
+            "TeaCache: blocks [%d, %d) of %d, thresh=%.3f, warmup=%d",
             self._start, self._end, len(self._wan.blocks),
             self._thresh, self._warmup,
         )

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
 from collections import OrderedDict
 from typing import Any
 
@@ -19,9 +18,9 @@ import comfy.model_management as mm
 
 from .vram import collect_garbage
 
-logger = logging.getLogger(__name__)
+from .log import get_logger as _get_logger
 
-
+logger = _get_logger("ModelMgr")
 # ---------------------------------------------------------------------------
 # Lightweight proxy for latent_preview.prepare_callback compatibility
 # ---------------------------------------------------------------------------
@@ -80,7 +79,7 @@ def _cache_evict_patcher(patcher: Any) -> bool:
     for key, value in list(_model_cache.items()):
         if value is patcher:
             _model_cache.pop(key, None)
-            logger.info("[BerniniR] Evicted model from cache: %s", key[:8])
+            logger.info("Evicted model from cache: %s", key[:8])
             removed = True
     if removed:
         collect_garbage()
@@ -93,7 +92,7 @@ def _cache_put(key: str, patcher: Any) -> None:
     _model_cache.move_to_end(key)
     while len(_model_cache) > _MAX_MODEL_CACHE:
         oldest_key, oldest_patcher = _model_cache.popitem(last=False)
-        logger.info("[BerniniR] Model cache evict: %s", oldest_key[:8])
+        logger.info("Model cache evict: %s", oldest_key[:8])
         try:
             # Cancel any async block-swap transfers before unloading.
             _dm = getattr(getattr(oldest_patcher, "model", None),
@@ -188,7 +187,7 @@ class BerniniRModelHandle:
         if cached is not None:
             _model_cache.move_to_end(cache_key)  # LRU bump
             self._model_patcher = cached
-            logger.info("[BerniniR] Cache hit: %s", cache_key[:8])
+            logger.debug("Cache hit: %s", cache_key[:8])
             if need_swap:
                 # BlockSwapManager owns GPU placement — keep on offload device.
                 cached.load_device = cached.offload_device
@@ -213,7 +212,7 @@ class BerniniRModelHandle:
             return self._model_patcher
 
         logger.info(
-            "[BerniniR] Loading model from disk: %s (loras=%d)",
+            "Loading model from disk: %s (loras=%d)",
             self.model_path,
             len(self.lora_specs),
         )
@@ -236,7 +235,7 @@ class BerniniRModelHandle:
         # 3. Build the model.  For .safetensors we use a streaming loader that
         #    never holds the full state dict in RAM, so the load peak drops
         #    from ~2x model size to ~1x model size + one block group.
-        from ..models.wan_model import load_bernini_model
+        from ..models.loader import load_bernini_model
         patcher = load_bernini_model(
             self.model_path,
             model_options=model_opts,
@@ -293,7 +292,7 @@ class BerniniRModelHandle:
         if self._model_patcher is None:
             return
 
-        logger.info("[BerniniR] Unloading model from memory: %s", self.model_path)
+        logger.info("Unloading model from memory: %s", self.model_path)
 
         patcher = self._model_patcher
 
@@ -338,7 +337,7 @@ class BerniniRModelHandle:
             try:
                 mgr.shutdown()
             except Exception as e:
-                logger.warning("[BerniniR] BlockSwap shutdown failed: %s", e)
+                logger.warning("BlockSwap shutdown failed: %s", e)
             try:
                 delattr(dm, "_block_swap_mgr")
             except Exception:
@@ -350,7 +349,7 @@ class BerniniRModelHandle:
         try:
             mm.unload_model_and_clones(patcher)
         except Exception as e:
-            logger.warning("[BerniniR] unload_model_and_clones failed: %s", e)
+            logger.warning("unload_model_and_clones failed: %s", e)
 
         # 3. Drop our reference.
         self._model_patcher = None

@@ -14,20 +14,21 @@ shared file position is mutated, so block-group reads are thread-safe.
 from __future__ import annotations
 
 import json
-import logging
 import os
 import struct
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 import torch
 
 # Shared typed payloads
 from .types import LoraTensorEntry
+from .keys import _normalize_unet_key
 
-logger = logging.getLogger(__name__)
+from .log import get_logger as _get_logger
 
-
+logger = _get_logger("BlockReader")
 # Cross-platform positioned read.
 #
 # POSIX: ``os.pread`` is atomic, position-independent and thread-safe.
@@ -92,18 +93,7 @@ TypedBlockMeta = dict[str, object]
 
 
 # ── Common utility: normalise safetensors key ──────────────────────────
-
-
-def _normalize_unet_key(key: str) -> str:
-    """Strip standard model prefixes, matching wan_model._normalize_unet_key."""
-    k = key
-    for prefix in (
-        "model.diffusion_model.", "diffusion_model.", "model.", "video_model.",
-    ):
-        if k.startswith(prefix):
-            k = k[len(prefix):]
-            break
-    return k
+# Canonical implementation lives in utils.keys (imported above).
 
 
 class RandomAccessBlockReader:
@@ -148,6 +138,11 @@ class RandomAccessBlockReader:
 
         self._lora_specs = lora_specs
 
+        # Shared tensor-level I/O pool for parallel read_block.  Lazy-built;
+        # a single pool per reader caps total in-flight reads regardless of
+        # how many _DiskPrefetcher workers call read_block concurrently.
+        self._io_pool: ThreadPoolExecutor | None = None
+
         # ── Build block plan ───────────────────────────────────────────
         self._plan: TypedBlockPlan = {}
         self._peripheral: TypedBlockPlan = {}
@@ -170,7 +165,7 @@ class RandomAccessBlockReader:
         self.num_layers: int = max(self._block_indices) + 1 if self._block_indices else 0
 
         logger.info(
-            "[BlockReader] %s: %d blocks, %d peripheral groups, %d raw keys",
+            "%s: %d blocks, %d peripheral groups, %d raw keys",
             os.path.basename(model_path), self.num_layers,
             len(self._peripheral), len(self._raw_keys),
         )
@@ -222,11 +217,14 @@ class RandomAccessBlockReader:
             return False
 
     def close(self) -> None:
-        """Close the underlying file descriptor."""
+        """Close the underlying file descriptor and shut down the I/O pool."""
         try:
             os.close(self._fd)
         except OSError:
             pass
+        if self._io_pool is not None:
+            self._io_pool.shutdown(wait=False)
+            self._io_pool = None
 
     def __enter__(self):
         return self
@@ -240,12 +238,31 @@ class RandomAccessBlockReader:
     def _read_entries(
         self, entries: dict[str, tuple[int, int]]
     ) -> dict[str, torch.Tensor]:
-        result: dict[str, torch.Tensor] = {}
-        for key, (offset, length) in entries.items():
-            raw = self._read_bytes(offset, length)
-            dtype, shape = self._tensor_info(key)
-            result[key] = torch.frombuffer(raw, dtype=dtype).reshape(shape)
-        return result
+        if len(entries) <= 1:
+            return {
+                key: self._read_one(key, offset, length)
+                for key, (offset, length) in entries.items()
+            }
+        # Parallel positioned reads across the block's tensors, submitted in
+        # file-offset order.  The shared pool keeps peak memory identical to
+        # the sequential path — the whole block is materialised either way.
+        ordered = sorted(entries.items(), key=lambda kv: kv[1][0])
+        pool = self._get_io_pool()
+        futs = [pool.submit(self._read_one, key, offset, length)
+                for key, (offset, length) in ordered]
+        return {key: fu.result() for (key, _), fu in zip(ordered, futs)}
+
+    def _read_one(self, key: str, offset: int, length: int) -> torch.Tensor:
+        """Read a single tensor from disk (thread-safe via ``_pread``)."""
+        raw = self._read_bytes(offset, length)
+        dtype, shape = self._tensor_info(key)
+        return torch.frombuffer(raw, dtype=dtype).reshape(shape)
+
+    def _get_io_pool(self) -> ThreadPoolExecutor:
+        if self._io_pool is None:
+            self._io_pool = ThreadPoolExecutor(
+                max_workers=4, thread_name_prefix="block-reader-io")
+        return self._io_pool
 
     def _read_bytes(self, offset: int, length: int) -> bytearray:
         """Read raw bytes from disk at *offset*, thread-safe via pread.
@@ -288,8 +305,8 @@ class RandomAccessBlockReader:
     def _normalize_key(key: str) -> str:
         """Canonicalise a safetensors key to model state-dict form.
 
-        Delegates to the module-level ``_normalize_unet_key`` shared
-        with ``LoraBlockReader`` and ``wan_model._normalize_unet_key``.
+        Delegates to ``utils.keys._normalize_unet_key``, the canonical
+        implementation shared with the checkpoint loader and LoRA folding.
         """
         return _normalize_unet_key(key)
 
@@ -395,7 +412,7 @@ class LoraBlockReader:
 
             if unknown_count > 0:
                 logger.warning(
-                    "[LoraReader] %s: %d tensor(s) with unrecognised suffix "
+                    "%s: %d tensor(s) with unrecognised suffix "
                     "(silently skipped).  Examples: %s",
                     os.path.basename(path), unknown_count, unknown_examples,
                 )
@@ -403,7 +420,7 @@ class LoraBlockReader:
             valid_spec_idx += 1
 
         logger.info(
-            "[LoraReader] %d fd(s), %d valid spec(s), %d block(s) planned, "
+            "%d fd(s), %d valid spec(s), %d block(s) planned, "
             "%d non-block entry group(s)",
             len(self._fds), valid_spec_idx, len(self._plan), len(self._non_block_plan),
         )

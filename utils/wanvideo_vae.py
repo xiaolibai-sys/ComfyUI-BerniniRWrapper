@@ -8,7 +8,6 @@ Dependencies: einops, tqdm (both already present in ComfyUI environments).
 """
 from __future__ import annotations
 
-import logging
 
 from einops import rearrange, repeat
 import torch
@@ -20,8 +19,9 @@ import comfy.model_management as mm
 import comfy.ops
 from comfy.utils import ProgressBar
 
-logger = logging.getLogger(__name__)
+from .log import get_logger as _get_logger
 
+logger = _get_logger("VAE")
 ops = comfy.ops.disable_weight_init
 
 CACHE_T = 2

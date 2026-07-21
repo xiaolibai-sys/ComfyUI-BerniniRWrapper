@@ -9,7 +9,6 @@ eliminating the external dependency on ComfyUI-WanVideoWrapper.
 """
 from __future__ import annotations
 
-import logging
 
 import torch
 import comfy.model_management as mm
@@ -17,9 +16,9 @@ import comfy.utils
 
 from .wanvideo_vae import WanVideoVAE, WanVideoVAE38
 
-logger = logging.getLogger(__name__)
+from .log import get_logger as _get_logger
 
-
+logger = _get_logger("VAE")
 class BerniniRVAE:
     """ComfyUI-compatible VAE wrapper around ``WanVideoVAE``.
 

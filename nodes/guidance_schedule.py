@@ -12,12 +12,12 @@ that the sampler passes to :class:`~.bernini_sampling.BerniniModelWrapper`.
 from __future__ import annotations
 
 import math
-import logging
 
 from ..utils.types import BerniniGuidance
 
-logger = logging.getLogger(__name__)
+from ..utils.log import get_logger as _get_logger
 
+logger = _get_logger("Guidance")
 CURVE_TYPES = ["cosine", "linear", "piecewise"]
 
 
@@ -163,7 +163,7 @@ class BerniniR_GuidanceStrengthSchedule:
             end=guidance_end,
         )
         logger.info(
-            "[BerniniR] Guidance strength schedule: %s, %d steps, %.1f -> %.1f",
+            "Guidance strength schedule: %s, %d steps, %.1f -> %.1f",
             curve, steps, guidance_start, guidance_end,
         )
         return (schedule,)

@@ -117,6 +117,7 @@ class BerniniBlockSwap:
     prefetch_count: int = 1
     pin_memory: bool = False
     loading_mode: str = "Streaming"  # "Full" or "Streaming"
+    disk_workers: int = 4  # _DiskPrefetcher threads (Streaming mode only)
 
     @property
     def lazy(self) -> bool:
@@ -147,23 +148,49 @@ class DiskLoadRequest:
 # Slot entry — unified type for ring-buffer slot pool
 # ---------------------------------------------------------------------------
 
+def _params_extra_fields(params) -> tuple[dict, dict]:
+    """Split a layout ``Params`` dataclass into (tensor_extras, meta_extras).
+
+    ``scale``/``orig_dtype``/``orig_shape`` are first-class SlotEntry fields;
+    anything else a layout carries (nvfp4 ``block_scale`` tensor, ``transposed``
+    flag, future layouts) is captured here so slot copies stay layout-agnostic.
+    """
+    import dataclasses
+    tensor_extras: dict = {}
+    meta_extras: dict = {}
+    if not dataclasses.is_dataclass(params):
+        return tensor_extras, meta_extras
+    for f in dataclasses.fields(params):
+        if f.name in ("scale", "orig_dtype", "orig_shape"):
+            continue
+        v = getattr(params, f.name)
+        if isinstance(v, torch.Tensor):
+            tensor_extras[f.name] = v
+        else:
+            meta_extras[f.name] = v
+    return tensor_extras, meta_extras
+
+
 class SlotEntry:
     """Unified slot entry for the engine's ring-buffer slot pool.
 
     Wraps either a regular ``torch.Tensor`` or the internal components of a
-    comfy_kitchen ``QuantizedTensor`` (``_qdata`` + ``_params.scale``), so
-    the swap engine never branches on parameter type.
+    comfy_kitchen ``QuantizedTensor`` (``_qdata`` + ``_params``), so
+    the swap engine never branches on parameter type.  Extra layout params
+    (e.g. nvfp4's ``block_scale``) ride in ``extra`` / ``meta``.
     """
 
     __slots__ = ('is_qt', 'data', 'scale', 'layout_cls', 'orig_dtype',
-                 'orig_shape', 'lora')
+                 'orig_shape', 'lora', 'extra', 'meta')
 
     def __init__(self, *, data: torch.Tensor,
                  scale: torch.Tensor | None = None,
                  layout_cls: str = '',
                  orig_dtype: torch.dtype | None = None,
                  orig_shape: tuple[int, ...] | None = None,
-                 lora: list | None = None):
+                 lora: list | None = None,
+                 extra: dict | None = None,
+                 meta: dict | None = None):
         self.is_qt = scale is not None
         self.data = data
         self.scale = scale
@@ -176,22 +203,27 @@ class SlotEntry:
         # is inferred from whether ``lora`` is still present, so no external
         # bookkeeping set is needed.
         self.lora = lora
+        # Extra layout params: tensors (nvfp4 block_scale) and scalars/flags
+        # (nvfp4 transposed) needed to rebuild ``Params`` on assign_to.
+        self.extra = extra or {}
+        self.meta = meta or {}
 
     @classmethod
     def empty_like(cls, param: nn.Parameter, device, pin_memory: bool = False):
         """Pre-allocate a slot buffer matching *param* on *device*."""
         d = param.data
         if hasattr(d, '_qdata'):
+            pin = device == "cpu" and pin_memory
+            t_extras, m_extras = _params_extra_fields(d._params)
             return cls(
-                data=torch.empty_like(
-                    d._qdata, device=device,
-                    pin_memory=(device == "cpu" and pin_memory)),
-                scale=torch.empty_like(
-                    d._params.scale, device=device,
-                    pin_memory=(device == "cpu" and pin_memory)),
+                data=torch.empty_like(d._qdata, device=device, pin_memory=pin),
+                scale=torch.empty_like(d._params.scale, device=device, pin_memory=pin),
                 layout_cls=d._layout_cls,
                 orig_dtype=d._params.orig_dtype,
                 orig_shape=tuple(d.shape),
+                extra={n: torch.empty_like(t, device=device, pin_memory=pin)
+                       for n, t in t_extras.items()},
+                meta=m_extras,
             )
         return cls(
             data=torch.empty_like(d, device=device,
@@ -208,16 +240,16 @@ class SlotEntry:
         may already be on a different device.
         """
         if entry.is_qt:
+            pin = device == "cpu" and pin_memory
             return cls(
-                data=torch.empty_like(
-                    entry.data, device=device,
-                    pin_memory=(device == "cpu" and pin_memory)),
-                scale=torch.empty_like(
-                    entry.scale, device=device,
-                    pin_memory=(device == "cpu" and pin_memory)),
+                data=torch.empty_like(entry.data, device=device, pin_memory=pin),
+                scale=torch.empty_like(entry.scale, device=device, pin_memory=pin),
                 layout_cls=entry.layout_cls,
                 orig_dtype=entry.orig_dtype,
                 orig_shape=entry.orig_shape,
+                extra={n: torch.empty_like(t, device=device, pin_memory=pin)
+                       for n, t in entry.extra.items()},
+                meta=dict(entry.meta),
             )
         return cls(
             data=torch.empty_like(
@@ -231,6 +263,10 @@ class SlotEntry:
         if self.is_qt:
             self.data.copy_(d._qdata, non_blocking=non_blocking)
             self.scale.copy_(d._params.scale, non_blocking=non_blocking)
+            t_extras, _ = _params_extra_fields(d._params)
+            for n, t in t_extras.items():
+                if n in self.extra:
+                    self.extra[n].copy_(t, non_blocking=non_blocking)
         else:
             self.data.copy_(d, non_blocking=non_blocking)
 
@@ -253,6 +289,8 @@ class SlotEntry:
                 scale=self.scale,
                 orig_dtype=self.orig_dtype,
                 orig_shape=self.orig_shape,
+                **self.meta,
+                **self.extra,
             )
             qt = QuantizedTensor(self.data, self.layout_cls, params)
             sub._parameters[pn] = nn.Parameter(qt, requires_grad=False)

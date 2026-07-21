@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 
 from ..utils.types import BerniniAttention
 from .backends import (
@@ -11,9 +10,9 @@ from .backends import (
     best_available,
 )
 
-logger = logging.getLogger(__name__)
+from ..utils.log import get_logger as _get_logger
 
-
+logger = _get_logger("Attn")
 class BerniniR_AttentionConfig:
     """Select attention backend with automatic fallback.
 
@@ -63,7 +62,7 @@ class BerniniR_AttentionConfig:
             best=best,
         )
         logger.info(
-            f"[BerniniR] Attention config: backend={backend}, "
+            f"Attention config: backend={backend}, "
             f"force={force_backend}, available={available}, best={best}"
         )
         return (config,)

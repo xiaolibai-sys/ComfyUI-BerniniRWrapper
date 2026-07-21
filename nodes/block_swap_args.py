@@ -32,6 +32,10 @@ class BerniniR_BlockSwapArgs:
     - ``Full``: all block weights are loaded into CPU RAM at startup
       before sampling begins.  Higher RAM usage, no disk I/O during
       sampling.
+
+    ``disk_workers`` is the thread count of the on-demand disk prefetcher
+    (Streaming mode only).  Higher values read blocks faster on NVMe;
+    2 is safer on SATA drives.
     """
 
     @classmethod
@@ -66,6 +70,13 @@ class BerniniR_BlockSwapArgs:
                     "default": "Streaming",
                     "tooltip": "Streaming: load blocks on demand (low RAM). Full: load all at startup (no disk I/O).",
                 }),
+                "disk_workers": ("INT", {
+                    "default": 4,
+                    "min": 1,
+                    "max": 16,
+                    "step": 1,
+                    "tooltip": "Disk prefetch threads (Streaming mode only). Higher = faster block reads on NVMe; 2 is safer on SATA.",
+                }),
             },
         }
 
@@ -85,6 +96,7 @@ class BerniniR_BlockSwapArgs:
         prefetch_count: int = 1,
         pin_memory: bool = False,
         loading_mode: str = "Streaming",
+        disk_workers: int = 4,
     ):
         return (BerniniBlockSwap(
             block_to_swap=block_to_swap,
@@ -92,4 +104,5 @@ class BerniniR_BlockSwapArgs:
             prefetch_count=prefetch_count,
             pin_memory=pin_memory,
             loading_mode=loading_mode,
+            disk_workers=disk_workers,
         ),)

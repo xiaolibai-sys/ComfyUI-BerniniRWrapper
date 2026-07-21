@@ -8,13 +8,12 @@ control over weight loading and keeps inactive models out of RAM.
 """
 from __future__ import annotations
 
-import logging
 
 import folder_paths
 
-logger = logging.getLogger(__name__)
+from ..utils.log import get_logger as _get_logger
 
-
+logger = _get_logger("LoRA")
 class BerniniR_LoadLoRA:
     """Append a LoRA to a Bernini-R model handle.
 
@@ -59,7 +58,7 @@ class BerniniR_LoadLoRA:
 
         lora_path = folder_paths.get_full_path_or_raise("loras", lora_name)
         logger.info(
-            "[BerniniR] Queued LoRA: %s (strength=%.3f)",
+            "Queued LoRA: %s (strength=%.3f)",
             lora_name, strength_model,
         )
 

@@ -15,7 +15,6 @@ Having a single source of truth:
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -29,9 +28,9 @@ from .types import (
     Conditioning,
 )
 
-logger = logging.getLogger(__name__)
+from .log import get_logger as _get_logger
 
-
+logger = _get_logger("Inject")
 @dataclass
 class InjectionContext:
     """All injection data extracted once at sampling start.
@@ -108,7 +107,7 @@ class InjectionContext:
             ctx.nag_params = pos_cond.get_extra("nag_params")
             if ctx.nag_context is not None and ctx.nag_params:
                 logger.info(
-                    "[BerniniR] NAG enabled: scale=%.1f, tau=%.1f, alpha=%.2f",
+                    "NAG enabled: scale=%.1f, tau=%.1f, alpha=%.2f",
                     ctx.nag_params.get("nag_scale", 0),
                     ctx.nag_params.get("nag_tau", 0),
                     ctx.nag_params.get("nag_alpha", 0),
@@ -211,7 +210,7 @@ class InjectionContext:
         if _orig is not None:
             dm.transformer_forward = _orig
             logger.warning(
-                "[BerniniR] Block swap is incompatible with "
+                "Block swap is incompatible with "
                 "torch.compile — compile disabled for this run."
             )
 

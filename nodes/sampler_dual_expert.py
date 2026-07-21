@@ -11,7 +11,6 @@ Supports all guidance modes: CFG, APG, RAAG, S2, STG_A, STG_R.
 
 from __future__ import annotations
 
-import logging
 
 import torch
 import comfy.sample
@@ -26,9 +25,9 @@ except Exception:
 from ..utils.types import BerniniBlockSwap, BerniniGuidance, BerniniContext, BerniniGuidanceConfig
 from .bernini_sampling import bernini_sample_dual
 
-logger = logging.getLogger(__name__)
+from ..utils.log import get_logger as _get_logger
 
-
+logger = _get_logger("Sampler")
 class BerniniR_DualExpertSampler:
     """Dual-model sampler with block-swap VRAM offloading.
 

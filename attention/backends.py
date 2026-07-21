@@ -11,14 +11,14 @@ Each backend is a standalone function that can be used as
 
 from __future__ import annotations
 
-import logging
 from typing import Callable, Optional
 
 import torch
 import torch.nn.functional as F
 
-logger = logging.getLogger(__name__)
+from ..utils.log import get_logger as _get_logger
 
+logger = _get_logger("Attn")
 # ---------------------------------------------------------------------------
 # Backend discovery
 # ---------------------------------------------------------------------------
@@ -119,11 +119,11 @@ def _register_custom_op(name, fn, fake_fn):
     try:
         op = torch.library.custom_op(f"bernini::{name}", mutates_args=())(fn)
         op.register_fake(fake_fn)
-        logger.debug(f"[BerniniR] Registered custom op bernini::{name}")
+        logger.debug(f"Registered custom op bernini::{name}")
         return op
     except Exception as e:
         logger.warning(
-            f"[BerniniR] Failed to register custom op bernini::{name}: {e}. "
+            f"Failed to register custom op bernini::{name}: {e}. "
             f"Using raw function (Dynamo will graph-break at this op)."
         )
         return fn  # fallback: use raw function (may cause graph breaks)
@@ -270,7 +270,7 @@ def create_attention_override(
 
     fn = _BACKENDS.get(backend)
     if fn is not None:
-        logger.debug(f"[BerniniR] Attention backend: {backend}")
+        logger.debug(f"Attention backend: {backend}")
         return fn
 
     if force_backend:
@@ -283,7 +283,7 @@ def create_attention_override(
     for name, fallback_fn in _BACKENDS.items():
         if _AVAILABLE.get(name, False):
             logger.warning(
-                f"[BerniniR] Backend '{backend}' unavailable; "
+                f"Backend '{backend}' unavailable; "
                 f"falling back to '{name}'."
             )
             return fallback_fn
@@ -297,5 +297,4 @@ def create_attention_override(
 # ---------------------------------------------------------------------------
 
 _avail = available_backends()
-logger.info(f"[BerniniR] Attention backends available: {_avail}")
-logger.info(f"[BerniniR] Best backend: {best_available()}")
+logger.debug(f"Attention backends available: {_avail}; best: {best_available()}")

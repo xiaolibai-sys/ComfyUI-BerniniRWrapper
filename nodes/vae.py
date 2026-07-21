@@ -7,7 +7,6 @@ loaded by ``BerniniR_VAELoader`` instead of ComfyUI's native ``comfy.sd.VAE``.
 
 from __future__ import annotations
 
-import logging
 from typing import Optional
 
 import torch
@@ -15,9 +14,9 @@ import torch
 from ..utils.color_match import COLORMATCH_METHODS, apply_color_match
 from ..utils.vram import inference_mode, collect_garbage
 
-logger = logging.getLogger(__name__)
+from ..utils.log import get_logger as _get_logger
 
-
+logger = _get_logger("VAE")
 # ---------------------------------------------------------------------------
 # BerniniR_VAEDecode
 # ---------------------------------------------------------------------------
@@ -123,7 +122,7 @@ class BerniniR_VAEDecode:
                 )
             except torch.cuda.OutOfMemoryError:
                 raise RuntimeError(
-                    "[BerniniR] VAE decode ran out of VRAM. "
+                    "VAE decode ran out of VRAM. "
                     "Try enabling spatial tiling or reducing the number of frames."
                 )
 
@@ -147,12 +146,12 @@ class BerniniR_VAEDecode:
             if ref_image is None:
                 ref_image = pixels[:1]
                 logger.info(
-                    "[BerniniR] No ref_image provided; "
+                    "No ref_image provided; "
                     "using first decoded frame as reference."
                 )
 
             logger.info(
-                f"[BerniniR] Applying color match: method={colormatch}, "
+                f"Applying color match: method={colormatch}, "
                 f"blend={blend_strength}"
             )
             pixels = apply_color_match(
@@ -250,7 +249,7 @@ class BerniniR_VAEEncode:
                 )
             except torch.cuda.OutOfMemoryError:
                 raise RuntimeError(
-                    "[BerniniR] VAE encode ran out of VRAM. "
+                    "VAE encode ran out of VRAM. "
                     "Try enabling spatial tiling or reducing the input resolution."
                 )
 

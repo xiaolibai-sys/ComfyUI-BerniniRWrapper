@@ -7,13 +7,12 @@ share the same interpretation of user inputs.
 
 from __future__ import annotations
 
-import logging
 
 from .types import GuidanceMode
 
-logger = logging.getLogger(__name__)
+from .log import get_logger as _get_logger
 
-
+logger = _get_logger("Parse")
 # ---------------------------------------------------------------------------
 # Guidance mode
 # ---------------------------------------------------------------------------
@@ -31,7 +30,7 @@ def parse_guidance_mode(mode: str | GuidanceMode) -> GuidanceMode:
         return GuidanceMode(normalised)
     except ValueError:
         logger.warning(
-            "[BerniniR] Unknown guidance mode %r; falling back to CFG.",
+            "Unknown guidance mode %r; falling back to CFG.",
             mode,
         )
         return GuidanceMode.CFG
@@ -70,14 +69,14 @@ def parse_stg_block_indices(
                 idx = int(tok)
             indices.append(idx)
         except ValueError:
-            logger.warning("[BerniniR] Ignoring invalid STG block token %r.", raw)
+            logger.warning("Ignoring invalid STG block token %r.", raw)
             continue
 
     if indices:
         oob = [i for i in indices if i < 0 or i >= total_blocks]
         if oob:
             logger.warning(
-                "[BerniniR] STG block indices %s out of range "
+                "STG block indices %s out of range "
                 "(model has %d blocks 0-%d); ignored.",
                 oob, total_blocks, total_blocks - 1,
             )

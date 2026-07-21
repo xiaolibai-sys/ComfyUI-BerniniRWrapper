@@ -10,7 +10,6 @@ Nodes:
 
 from __future__ import annotations
 
-import logging
 
 import torch
 import comfy.model_management as mm
@@ -21,8 +20,9 @@ import folder_paths
 from ..utils.model_manager import load_model_handle
 from ..utils.vae_wrapper import load_berninir_vae
 
-logger = logging.getLogger(__name__)
+from ..utils.log import get_logger as _get_logger
 
+logger = _get_logger("Loaders")
 # ---------------------------------------------------------------------------
 # BerniniR_ModelLoader
 # ---------------------------------------------------------------------------
@@ -137,7 +137,7 @@ class BerniniR_CompileModel:
         if purge_cache:
             from ..models.wan_compile import purge_compile_cache
             if purge_compile_cache():
-                logger.info("[BerniniR] Compile cache purged via BerniniR_CompileModel(purge_cache=True).")
+                logger.info("Compile cache purged via BerniniR_CompileModel(purge_cache=True).")
         if compile_mode == "none":
             return (model_handle,)
         new_handle = model_handle.clone_with_compile(
@@ -246,7 +246,7 @@ class BerniniR_VAELoader:
         )
         if vae is None:
             raise RuntimeError(
-                f"[BerniniR] Failed to load Bernini-R VAE from {vae_path}"
+                f"Failed to load Bernini-R VAE from {vae_path}"
             )
-        logger.info(f"[BerniniR] Loaded VAE with dtype={dtype}: {vae_path}")
+        logger.info(f"Loaded VAE with dtype={dtype}: {vae_path}")
         return (vae,)

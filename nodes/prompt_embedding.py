@@ -12,7 +12,6 @@ Portable version of the Bernini-R Prompt Planner, usable as a standalone node.
 
 from __future__ import annotations
 
-import logging
 
 import folder_paths
 
@@ -24,8 +23,9 @@ from ..utils.text_cache import (
 )
 from ..utils.vram import collect_garbage
 
-logger = logging.getLogger(__name__)
+from ..utils.log import get_logger as _get_logger
 
+logger = _get_logger("Prompt")
 # ---------------------------------------------------------------------------
 # System prompts — task-specific instruction prefixes
 # ---------------------------------------------------------------------------
@@ -175,7 +175,7 @@ class BerniniR_PromptEmbedding:
         negative = _load_cached_conditioning(negative_prompt, tag) if use_disk_cache else None
 
         if positive is not None and negative is not None:
-            logger.info("[BerniniR] Both prompts served from disk cache; skipping CLIP load.")
+            logger.info("Both prompts served from disk cache; skipping CLIP load.")
             if force_offload and clip is not None and clip_loaded_internally:
                 clip = None  # drop reference to our internally-loaded CLIP
             collect_garbage()
@@ -189,7 +189,7 @@ class BerniniR_PromptEmbedding:
                         "No CLIP input connected and clip_name not set; "
                         "cannot encode uncached prompt."
                     )
-                logger.info(f"[BerniniR] Loading CLIP on demand: {clip_name}")
+                logger.info(f"Loading CLIP on demand: {clip_name}")
                 clip = _load_clip_internal(clip_name, clip_type, clip_device)
                 clip_loaded_internally = True
 
@@ -212,5 +212,5 @@ class BerniniR_PromptEmbedding:
                 del clip
                 collect_garbage()
 
-        logger.info(f"[BerniniR] PromptEmbedding task='{task_type}' → system line {task_index}")
+        logger.info(f"PromptEmbedding task='{task_type}' → system line {task_index}")
         return (positive, negative, system_prompt, full_prompt)

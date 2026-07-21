@@ -10,12 +10,12 @@ denoising, including scheduling strategy, window size, overlap, and blending.
 """
 from __future__ import annotations
 
-import logging
 
 from ..utils.types import BerniniContext, ContextSchedule, FuseMethod
 
-logger = logging.getLogger(__name__)
+from ..utils.log import get_logger as _get_logger
 
+logger = _get_logger("CtxWin")
 CONTEXT_SCHEDULES = ["uniform_standard", "uniform_looped", "static_standard"]
 FUSE_METHODS = ["linear", "smooth", "pyramid"]
 
@@ -93,7 +93,7 @@ class BerniniR_ContextWindow:
             fuse_method=FuseMethod(fuse_method),
             rope_ntk_scale=rope_ntk_scale,
         )
-        logger.info(f"[BerniniR] Context window config: schedule={context_schedule}, "
+        logger.info(f"Context window config: schedule={context_schedule}, "
                     f"frames={context_frames}, overlap={context_overlap}, "
                     f"stride={context_stride}, freenoise={freenoise}, fuse={fuse_method}")
         return (ctx,)

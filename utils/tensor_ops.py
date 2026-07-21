@@ -15,12 +15,12 @@ any future subclass.
 
 from __future__ import annotations
 
-import logging
 
 import torch
 
-logger = logging.getLogger(__name__)
+from .log import get_logger as _get_logger
 
+logger = _get_logger("TensorOps")
 # ---------------------------------------------------------------------------
 # Detection helpers
 # ---------------------------------------------------------------------------

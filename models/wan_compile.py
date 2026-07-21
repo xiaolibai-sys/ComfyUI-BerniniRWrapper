@@ -8,12 +8,12 @@ forward for context-window RoPE ``t_start`` and NTK scaling support.
 
 from __future__ import annotations
 
-import logging
 
 import torch
 
-logger = logging.getLogger(__name__)
+from ..utils.log import get_logger as _get_logger
 
+logger = _get_logger("Compile")
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -130,10 +130,10 @@ if not _inc_path or not _lib_path:
 if _inc_path:
     _existing = os.environ.get("INCLUDE", "")
     os.environ["INCLUDE"] = f"{_inc_path}{os.pathsep}{_existing}" if _existing else _inc_path
-    logger.info("[BerniniR] Injected WinSDK include: %s", _inc_path)
+    logger.info("Injected WinSDK include: %s", _inc_path)
 else:
     logger.warning(
-        "[BerniniR] Windows Kits include dir not found. "
+        "Windows Kits include dir not found. "
         "Set BERNINI_MSVC_INCLUDE, or point WindowsSdkDir/UniversalCRTSdkDir "
         "at the Windows 10 SDK."
     )
@@ -141,10 +141,10 @@ else:
 if _lib_path:
     _existing = os.environ.get("LIB", "")
     os.environ["LIB"] = f"{_lib_path}{os.pathsep}{_existing}" if _existing else _lib_path
-    logger.info("[BerniniR] Injected WinSDK lib: %s", _lib_path)
+    logger.info("Injected WinSDK lib: %s", _lib_path)
 else:
     logger.warning(
-        "[BerniniR] Windows Kits lib dir not found (kernel32.lib). "
+        "Windows Kits lib dir not found (kernel32.lib). "
         "Set BERNINI_MSVC_LIB, or point WindowsSdkDir/UniversalCRTSdkDir "
         "at the Windows 10 SDK."
     )
@@ -207,7 +207,7 @@ def purge_compile_cache(force: bool = False) -> bool:
         os.makedirs(target, exist_ok=True)
         return True
     except Exception as e:
-        logger.warning("[BerniniR] Failed to purge compile cache %s: %s", target, e)
+        logger.warning("Failed to purge compile cache %s: %s", target, e)
         return False
 
 
@@ -229,7 +229,7 @@ def _maybe_auto_purge_compile_cache() -> None:
     if prev != _BERNINI_CACHE_VERSION:
         if purge_compile_cache():
             logger.info(
-                "[BerniniR] Compile cache purged on version change (%s -> %s).",
+                "Compile cache purged on version change (%s -> %s).",
                 prev or "<none>", _BERNINI_CACHE_VERSION,
             )
         try:
@@ -239,7 +239,7 @@ def _maybe_auto_purge_compile_cache() -> None:
             pass
     if os.environ.get("BERNINI_PURGE_COMPILE_CACHE", "").lower() in ("1", "true", "yes"):
         if purge_compile_cache():
-            logger.info("[BerniniR] Compile cache purged (BERNINI_PURGE_COMPILE_CACHE).")
+            logger.info("Compile cache purged (BERNINI_PURGE_COMPILE_CACHE).")
 
 
 _maybe_auto_purge_compile_cache()
@@ -262,21 +262,21 @@ def apply_torch_compile(
     The pre-processing (``pre_forward``) stays in eager mode.
     """
     if mode == "none":
-        logger.info("[BerniniR] torch.compile disabled (mode='none').")
+        logger.info("torch.compile disabled (mode='none').")
         return model_patcher
 
     base_model = getattr(model_patcher, 'model', None)
     if base_model is None:
-        logger.warning("[BerniniR] No .model found on patcher.")
+        logger.warning("No .model found on patcher.")
         return model_patcher
 
     wan_model = getattr(base_model, 'diffusion_model', None)
     if wan_model is None:
-        logger.warning("[BerniniR] No .diffusion_model found.")
+        logger.warning("No .diffusion_model found.")
         return model_patcher
 
     if not torch.cuda.is_available():
-        logger.warning("[BerniniR] CUDA not available; skipping compile.")
+        logger.warning("CUDA not available; skipping compile.")
         return model_patcher
 
     # ── Enable TF32 for matmul (faster, prevents fp32 trace fusion) ─
@@ -290,7 +290,7 @@ def apply_torch_compile(
     elif hasattr(wan_model, 'forward_orig'):
         fwd_attr = 'forward_orig'
     else:
-        logger.warning("[BerniniR] No compilable forward method found.")
+        logger.warning("No compilable forward method found.")
         return model_patcher
 
     # ── Save original ─────────────────────────────────────────────
@@ -304,7 +304,7 @@ def apply_torch_compile(
     torch.compiler.reset()
 
     if mode in ("reduce-overhead", "max-autotune", "max-autotune-no-cudagraphs"):
-        logger.info(f"[BerniniR] Mode '{mode}' → 'default' (no C++ SDK)")
+        logger.info(f"Mode '{mode}' → 'default' (no C++ SDK)")
         mode = "default"
 
     try:
@@ -314,10 +314,10 @@ def apply_torch_compile(
 
         compiled_fn = torch.compile(compilable_fn, mode=mode, **compile_kwargs)
         setattr(wan_model, fwd_attr, compiled_fn)
-        logger.info(f"[BerniniR] torch.compile applied to {fwd_attr}: "
+        logger.info(f"torch.compile applied to {fwd_attr}: "
                     f"mode={mode}, fullgraph={fullgraph}, dynamic={dynamic}")
     except Exception as e:
-        logger.warning(f"[BerniniR] torch.compile failed: {e}. Falling back to uncompiled.")
+        logger.warning(f"torch.compile failed: {e}. Falling back to uncompiled.")
         setattr(wan_model, fwd_attr, compilable_fn)
 
     if torch.cuda.is_available():
@@ -354,4 +354,4 @@ def restore_model(model_patcher) -> None:
         wan_model.forward = wan_model._original_forward
         delattr(wan_model, '_original_forward')
 
-    logger.info("[BerniniR] Model restored to uncompiled state.")
+    logger.info("Model restored to uncompiled state.")

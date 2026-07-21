@@ -11,13 +11,12 @@ be wired directly to the sampler for standard CFG.
 """
 from __future__ import annotations
 
-import logging
 
 from ..utils.types import Conditioning
 
-logger = logging.getLogger(__name__)
+from ..utils.log import get_logger as _get_logger
 
-
+logger = _get_logger("NAG")
 class BerniniR_ApplyNAG:
     """Attach NAG guidance data to positive conditioning.
 
@@ -87,7 +86,7 @@ class BerniniR_ApplyNAG:
         # ── NAG requires negative conditioning ───────────────────────
         if negative is None or len(negative) == 0 or len(negative[0]) == 0:
             raise ValueError(
-                "[BerniniR] NAG requires a negative conditioning input. "
+                "NAG requires a negative conditioning input. "
                 "Connect both positive and negative from the prompt planner."
             )
 
@@ -107,7 +106,7 @@ class BerniniR_ApplyNAG:
         )
 
         logger.info(
-            "[BerniniR] NAG active: scale=%.1f, tau=%.1f, alpha=%.2f, inplace=%s",
+            "NAG active: scale=%.1f, tau=%.1f, alpha=%.2f, inplace=%s",
             nag_scale, nag_tau, nag_alpha, inplace,
         )
         # Positive → sampler positive (with NAG), negative → sampler negative (for CFG)

@@ -50,7 +50,6 @@ Usage::
 
 from __future__ import annotations
 
-import logging
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -66,8 +65,9 @@ from .tensor_ops import (
 )
 from .types import DiskLoadRequest, SlotEntry
 
-logger = logging.getLogger(__name__)
+from .log import get_logger as _get_logger
 
+logger = _get_logger("BlockSwap")
 # ═══════════════════════════════════════════════════════════════════════════
 # _BlockWindow — pure state tracking
 # ═══════════════════════════════════════════════════════════════════════════
@@ -204,6 +204,16 @@ class PinStage:
 # _TransferEngine — CUDA stream + async H2D/D2H
 # ═══════════════════════════════════════════════════════════════════════════
 
+def _copy_qt_extras(entry, qt, non_blocking: bool = False) -> None:
+    """Copy a QuantizedTensor's extra layout params (e.g. nvfp4 block_scale)
+    into a slot entry.  ``_params_extra_fields`` introspects the dataclass so
+    new layouts work without code changes."""
+    from .types import _params_extra_fields
+    t_extras, _ = _params_extra_fields(qt._params)
+    for n, t in t_extras.items():
+        if n in entry.extra:
+            entry.extra[n].copy_(t, non_blocking=non_blocking)
+
 class _TransferEngine:
     """CUDA stream + fixed slot pools for churn-free block swaps.
 
@@ -217,8 +227,10 @@ class _TransferEngine:
       (``window + prefetch``) used while a block computes.
 
     Blocks move between pools with ``copy_`` (never ``module.to``), so no new
-    tensors are allocated on the hot path.  ``pin_memory`` makes the home pool
-    page-locked, enabling async H2D on the dedicated stream.
+    tensors are allocated on the hot path.  ``pin_memory`` enables a small
+    pinned staging ring (``PinStage``, sized to the prefetch count) so H2D
+    copies on the dedicated stream are true async DMA; the (N-W) home pool
+    itself stays pageable to keep the locked-page footprint small.
 
     The legacy ``to_gpu``/``to_cpu`` *move* primitives are retained for
     ``StreamingBlockPipeline`` (one-off model pre-load), which does not use the
@@ -252,6 +264,14 @@ class _TransferEngine:
 
         # block_idx → CUDA event recorded after async transfer started
         self._events: dict[int, torch.cuda.Event] = {}
+
+        # hslot → CUDA event recorded after an async D2H write-back into
+        # that home slot completed enqueueing.  Host-side consumers of the
+        # slot (load_block's CPU staging copy, DiskHome.read_into's disk
+        # write) MUST synchronise on it first; DMA-vs-DMA reuse (another
+        # offload into the same slot) is already ordered by the shared
+        # transfer stream.
+        self._d2h_events: dict[int, torch.cuda.Event] = {}
 
         # ---- slot pools ----------------------------------------------------
         # Each slot is a ``dict[str, SlotEntry]`` — one entry per parameter.
@@ -298,7 +318,11 @@ class _TransferEngine:
         entries = {
             n: SlotEntry.empty_like(
                 p, device=device,
-                pin_memory=(device == "cpu" and self.pin_memory),
+                # Home pool stays pageable: only the small PinStage
+                # staging ring is pinned.  Pinning the whole (N-W) home
+                # pool can fail outright (cudaHostAlloc OOM) on machines
+                # whose RAM is mostly occupied by the resident model.
+                pin_memory=False,
             )
             for n, p in block.named_parameters()
         }
@@ -330,6 +354,7 @@ class _TransferEngine:
         self._home_free = list(range(len(self._home_pool)))
         self._gpu_cursor = 0
         self._events.clear()
+        self._d2h_events.clear()
 
     def clear_pools(self) -> None:
         """Drop all pool tensor references so GC can reclaim RAM/VRAM."""
@@ -342,10 +367,34 @@ class _TransferEngine:
         self._block_home.clear()
         self._block_gpu.clear()
         self._events.clear()
+        self._d2h_events.clear()
+
+    def _wait_home_slot(self, hslot: int) -> None:
+        """Host-wait for any in-flight async D2H into home slot *hslot*.
+
+        Required before the slot's tensors are read or overwritten by the
+        CPU (load staging copy, disk read_into) — a CUDA stream provides no
+        ordering guarantee against host-side memory access.
+        """
+        ev = self._d2h_events.pop(hslot, None)
+        if ev is not None:
+            ev.synchronize()
 
     def forget_home(self, block_idx: int) -> None:
         """Drop the home-slot mapping for *block_idx*."""
         self._block_home.pop(block_idx, None)
+
+    def discard_block(self, block_idx: int) -> None:
+        """Drop *block_idx* from the GPU ring WITHOUT writing weights home.
+
+        Safe only when the weights are recoverable elsewhere (lazy disk
+        mode) and the pools are about to be cleared — the block's params are
+        left pointing at GPU ring slots that ``clear_pools`` releases.
+        Steady-state offloads must NOT use this: the recycled home slot's
+        old content is dead, so the write-back is the only off-GPU copy.
+        """
+        self._events.pop(block_idx, None)
+        self._block_gpu.pop(block_idx, None)
 
     def _acquire_home(self) -> int:
         if not self._home_free:
@@ -407,6 +456,9 @@ class _TransferEngine:
         if block_idx in self._block_home:
             return self._block_home[block_idx]
         hslot = self._acquire_home()
+        # The acquired slot may still be receiving an async D2H from a
+        # previous offload — DiskHome.read_into overwrites it from the host.
+        self._wait_home_slot(hslot)
         entries = self._ensure_entries(self._home_pool, self._home_built,
                                        hslot, block, "cpu")
         if self._home is not None:
@@ -423,7 +475,11 @@ class _TransferEngine:
         """
         if block_idx in self._block_gpu:
             return
-        self.ensure_home(block_idx, block)
+        hslot = self.ensure_home(block_idx, block)
+        # Block params point at the home slot (assigned at offload); the CPU
+        # staging copies below read them on the host, so any in-flight async
+        # D2H into that slot must finish first.
+        self._wait_home_slot(hslot)
         ridx = self._ring_acquire()
 
         gpu = self._ensure_entries(self._gpu_pool, self._gpu_built,
@@ -448,6 +504,9 @@ class _TransferEngine:
                     if pe.is_qt:
                         ge.data.copy_(pe.data, non_blocking=True)
                         ge.scale.copy_(pe.scale, non_blocking=True)
+                        for en, et in pe.extra.items():
+                            if en in ge.extra:
+                                ge.extra[en].copy_(et, non_blocking=True)
                     else:
                         ge.data.copy_(pe.data, non_blocking=True)
             # Sync: compute stream waits for transfer stream BEFORE assign_to
@@ -465,6 +524,7 @@ class _TransferEngine:
                 if e.is_qt:
                     e.data.copy_(p.data._qdata)
                     e.scale.copy_(p.data._params.scale)
+                    _copy_qt_extras(e, p.data, non_blocking=False)
                 else:
                     e.data.copy_(p.data)
             # No event needed — synchronous copy completed above.
@@ -478,6 +538,7 @@ class _TransferEngine:
                 if e.is_qt:
                     e.data.copy_(p.data._qdata, non_blocking=nb)
                     e.scale.copy_(p.data._params.scale, non_blocking=nb)
+                    _copy_qt_extras(e, p.data, non_blocking=nb)
                 else:
                     e.data.copy_(p.data, non_blocking=nb)
 
@@ -511,6 +572,15 @@ class _TransferEngine:
         Copies GPU slot entry → home slot entry directly (NOT through
         ``block.named_parameters()``, which may have been freed by
         ``free_module_storage`` during model switching).
+
+        The D2H copies are issued on the dedicated transfer stream
+        (``non_blocking=True``) so they overlap with subsequent compute
+        instead of stalling the compute stream with ~one-block-worth of
+        synchronous pageable copies per offload.  Completion is tracked per
+        home slot in ``_d2h_events``; host-side consumers synchronise via
+        ``_wait_home_slot``, while DMA-side reuse is ordered by the shared
+        transfer stream itself.  ``assign_to`` below is a host-side pointer
+        rebind only, so it is safe to run while the copy is in flight.
         """
         event = self._events.pop(block_idx, None)
         if event is not None:
@@ -525,6 +595,9 @@ class _TransferEngine:
             elif force:
                 victim = min(self._block_home.keys())
                 hslot = self._block_home.pop(victim)
+                # A recycled slot may still be receiving the victim's async
+                # D2H; the force path releases + reassigns it from the host.
+                self._wait_home_slot(hslot)
                 if self._home is not None:
                     self._home.release(victim)
             else:
@@ -536,17 +609,42 @@ class _TransferEngine:
         gpu_entries = self._gpu_pool[gslot]
         home_entries = self._ensure_entries(self._home_pool, self._home_built,
                                             hslot, block, "cpu")
-        # Copy data directly from GPU entries to home entries for params
-        # present in both dicts.  This survives the block having been freed.
-        for n in list(gpu_entries.keys() & home_entries.keys()):
-            ge, he = gpu_entries[n], home_entries[n]
-            if ge.is_qt:
-                he.data.copy_(ge.data)
-                he.scale.copy_(ge.scale)
-            else:
-                he.data.copy_(ge.data)
-            he.lora = ge.lora  # carry co-located LoRA (None once folded)
-            he.assign_to(block, n)
+
+        if self._stream is not None:
+            # ── Async D2H on the transfer stream ─────────────────────────
+            # The transfer stream must first drain the compute stream (the
+            # offloaded block's forward may still be reading its GPU slot).
+            self._stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(self._stream):
+                for n in list(gpu_entries.keys() & home_entries.keys()):
+                    ge, he = gpu_entries[n], home_entries[n]
+                    if ge.is_qt:
+                        he.data.copy_(ge.data, non_blocking=True)
+                        he.scale.copy_(ge.scale, non_blocking=True)
+                        for en, et in ge.extra.items():
+                            if en in he.extra:
+                                he.extra[en].copy_(et, non_blocking=True)
+                    else:
+                        he.data.copy_(ge.data, non_blocking=True)
+                    he.lora = ge.lora  # carry co-located LoRA (None once folded)
+                    he.assign_to(block, n)
+            ev = torch.cuda.Event()
+            ev.record(self._stream)
+            self._d2h_events[hslot] = ev
+        else:
+            # ── Synchronous fallback (no transfer stream) ────────────────
+            for n in list(gpu_entries.keys() & home_entries.keys()):
+                ge, he = gpu_entries[n], home_entries[n]
+                if ge.is_qt:
+                    he.data.copy_(ge.data)
+                    he.scale.copy_(ge.scale)
+                    for en, et in ge.extra.items():
+                        if en in he.extra:
+                            he.extra[en].copy_(et)
+                else:
+                    he.data.copy_(ge.data)
+                he.lora = ge.lora  # carry co-located LoRA (None once folded)
+                he.assign_to(block, n)
         self._block_home[block_idx] = hslot
         return True
 
@@ -807,12 +905,12 @@ class _DiskPrefetcher:
 
     def _load_immediate(self, req: DiskLoadRequest) -> None:
         """Read *req.block_idx* from disk into CPU RAM (called from thread)."""
-        from ..models.wan_model import _stream_load_group
+        from ..models.loader import _stream_load_group
         try:
             tensors = self._reader.read_block(req.block_idx)
         except Exception as e:
             logger.error(
-                "[DiskPrefetch] Failed to read block %d: %s", req.block_idx, e
+                "Failed to read block %d: %s", req.block_idx, e
             )
             raise
         # Fused LoRA approach: skip fold at disk-load time;
@@ -839,7 +937,7 @@ class _DiskPrefetcher:
         try:
             payload = reader.read_block_lora(block_idx)
         except Exception:
-            logger.error("[DiskPrefetch] Failed to read LoRA for block %d", block_idx)
+            logger.error("Failed to read LoRA for block %d", block_idx)
             raise
         if payload:
             try:
@@ -923,8 +1021,10 @@ class DiskHome(BlockHome):
             if e is None:
                 # Deferred-weight materialisation: the param didn't exist
                 # when the slot was built.  Build a new CPU SlotEntry now.
+                # Home pool stays pageable (see _ensure_entries); only the
+                # PinStage staging ring is pinned.
                 slot[n] = SlotEntry.empty_like(
-                    p, device="cpu", pin_memory=p.is_pinned(),
+                    p, device="cpu", pin_memory=False,
                 )
                 slot[n].copy_from(p)
             else:
@@ -1036,7 +1136,7 @@ class BlockSwapManager:
         }
 
         logger.info(
-            "[BlockSwap] %d blocks total, window=%d, per-block ~%.0f MB, "
+            "%d blocks total, window=%d, per-block ~%.0f MB, "
             "target VRAM ~%.0f MB, prefetch=%s, count=%d, pin=%s, "
             "prewarmed=%d, lazy=%s",
             total, window_size, block_mb, window_size * block_mb,
@@ -1120,9 +1220,14 @@ class BlockSwapManager:
         # _slot_has_lora) — no external _lora_folded set is needed, so a slot
         # that was offloaded (and wrote its merged weights home) is simply
         # skipped on re-load.
+        _folded = 0
         for bidx in list(self._xfer._block_gpu):
             if self._slot_has_lora(bidx):
                 self._fold_lora_on_gpu(bidx)
+                _folded += 1
+        if _folded:
+            logger.info("Folded LoRA on GPU ring: %d / %d blocks",
+                        _folded, len(self._blocks))
 
     # ------------------------------------------------------------------
     # Public API — called from the model's forward pass
@@ -1249,16 +1354,31 @@ class BlockSwapManager:
         """
         self._xfer.cancel_all()
         self._xfer.sync_all()
+        lazy = self._home is not None and not isinstance(self._home, RamHome)
         for i in sorted(self._window.on_gpu):
-            self._xfer.offload_block(i, self._blocks[i], force=True)
+            if lazy:
+                # Disk is the source of truth and every home slot is about to
+                # be released + the pools cleared below, so writing GPU slots
+                # back would be pure waste (~window × block-size of D2H on
+                # every expert switch / unload).  Drop the mapping only.
+                self._xfer.discard_block(i)
+            else:
+                self._xfer.offload_block(i, self._blocks[i], force=True)
         self._window.clear()
         for name in self._PERIPHERAL_NAMES:
             self._offload_peripheral(name)
 
+        # Drain every async D2H issued above BEFORE releasing RAM or
+        # clearing pools: the DMA must not still be reading GPU slots or
+        # writing home slots once their references are dropped (freed host
+        # pages could be reused by an unrelated tensor mid-copy).
+        self._xfer.sync_all()
+        self._xfer._d2h_events.clear()
+
         # Lazy mode: drop the in-RAM weights (disk-backed) and let the engine
         # re-populate the home slot on the next load.  Resident mode keeps
         # them — they are the model's persistent CPU copy.
-        if self._home is not None and not isinstance(self._home, RamHome):
+        if lazy:
             for i in range(self._window.total):
                 self._home.release(i)
                 self._xfer.forget_home(i)
@@ -1349,6 +1469,18 @@ class BlockSwapManager:
             # Work on the SAME device as the slot (GPU ring or CPU home),
             # so LoRA tensors are moved there too — never to a mismatched device.
             work_device = slot.data.device
+
+            # ── nvfp4: dual-scale dequant → fp32 fold → dual-scale requant ──
+            if slot.is_qt and "NVFP4" in slot.layout_cls:
+                from ..utils.lora import _apply_streaming_loras_nvfp4
+                new_q, new_scale, new_bs = _apply_streaming_loras_nvfp4(
+                    slot.data, slot.scale, slot.extra["block_scale"],
+                    slot.orig_dtype, slot.orig_shape, slot.meta, lora_entries)
+                slot.data.copy_(new_q)
+                slot.scale.copy_(new_scale)
+                slot.extra["block_scale"].copy_(new_bs)
+                slot.lora = None
+                continue
 
             if slot.is_qt:
                 base_f = slot.data.to(_f32) * slot.scale.to(_f32)

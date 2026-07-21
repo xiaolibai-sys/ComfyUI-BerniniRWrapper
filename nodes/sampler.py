@@ -18,7 +18,6 @@ When context_options is NOT connected:
 
 from __future__ import annotations
 
-import logging
 
 import torch
 import comfy.sample
@@ -47,9 +46,9 @@ from ..utils.teacache import (
     TeaCache,
 )
 
-logger = logging.getLogger(__name__)
+from ..utils.log import get_logger as _get_logger
 
-
+logger = _get_logger("Sampler")
 # ---------------------------------------------------------------------------
 # Context window helpers
 # ---------------------------------------------------------------------------
@@ -467,9 +466,9 @@ def _inject_context_window(model_patcher, context_options: dict):
     topts = model_patcher.model_options
     prev = topts.get("model_function_wrapper", None)
     if prev is not None:
-        logger.info("[BerniniR] model_function_wrapper already exists; saving for restore.")
+        logger.info("model_function_wrapper already exists; saving for restore.")
     topts["model_function_wrapper"] = cw_wrapper
-    logger.info("[BerniniR] Context window model_function_wrapper injected.")
+    logger.info("Context window model_function_wrapper injected.")
     return prev
 
 
@@ -478,10 +477,10 @@ def _remove_context_window(model_patcher, prev_wrapper=None) -> None:
     topts = model_patcher.model_options
     if prev_wrapper is not None:
         topts["model_function_wrapper"] = prev_wrapper
-        logger.info("[BerniniR] Previous model_function_wrapper restored.")
+        logger.info("Previous model_function_wrapper restored.")
     elif "model_function_wrapper" in topts:
         del topts["model_function_wrapper"]
-        logger.info("[BerniniR] Context window wrapper removed.")
+        logger.info("Context window wrapper removed.")
 
 
 # ---------------------------------------------------------------------------

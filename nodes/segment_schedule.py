@@ -23,7 +23,6 @@ Format::
 
 from __future__ import annotations
 
-import logging
 import re
 
 import torch
@@ -38,8 +37,9 @@ from ..utils.text_cache import (
 )
 from ..utils.vram import collect_garbage
 
-logger = logging.getLogger(__name__)
+from ..utils.log import get_logger as _get_logger
 
+logger = _get_logger("Segment")
 # Full-width and half-width variants accepted.
 _SEGMENT_RE = re.compile(r"(\d+)\s*[-－]\s*(\d+)\s*[:：]\s*(.+)")
 _SEP_RE = re.compile(r"[;\n；]")
@@ -66,7 +66,7 @@ def parse_segments(text: str) -> list[SegmentSpec]:
         m = _SEGMENT_RE.match(part)
         if not m:
             logger.warning(
-                "[BerniniR] SegmentSchedule: skipping malformed line: %r", part)
+                "SegmentSchedule: skipping malformed line: %r", part)
             continue
         start = int(m.group(1))
         end = int(m.group(2))
@@ -75,7 +75,7 @@ def parse_segments(text: str) -> list[SegmentSpec]:
             # rather than producing an empty / negative-length segment that
             # would break the scheduler's frame arithmetic.
             logger.warning(
-                "[BerniniR] SegmentSchedule: malformed range %d-%d "
+                "SegmentSchedule: malformed range %d-%d "
                 "(start > end); swapping to %d-%d.",
                 start, end, end, start,
             )
@@ -263,7 +263,7 @@ class BerniniR_SegmentSchedule:
         raw = parse_segments(positive_prompt)
         segments = segments_cover_all(raw, total_frames)
         logger.info(
-            "[BerniniR] SegmentSchedule: %d raw segments → %d after fill, "
+            "SegmentSchedule: %d raw segments → %d after fill, "
             "%d total frames", len(raw), len(segments), total_frames,
         )
 
@@ -318,7 +318,7 @@ class BerniniR_SegmentSchedule:
                         raise ValueError(
                             "No CLIP input and no clip_name; cannot encode.")
                     logger.info(
-                        "[BerniniR] SegmentSchedule: loading CLIP on demand: %s",
+                        "SegmentSchedule: loading CLIP on demand: %s",
                         clip_name)
                     clip = _load_clip_internal(clip_name, clip_type, clip_device)
                     clip_loaded_internally = True
