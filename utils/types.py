@@ -25,6 +25,37 @@ except ImportError:
 
 
 # ---------------------------------------------------------------------------
+# ComfySamplerShim — lightweight ModelPatcher proxy for k-diffusion SDE
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ComfySamplerShim:
+    """Lightweight proxy that satisfies k-diffusion's ``model_patcher`` contract.
+
+    SDE-family samplers (``dpmpp_2m_sde`` etc.) resolve ``model_sampling`` by
+    walking the object graph::
+
+        model.inner_model.model_patcher.get_model_object('model_sampling')
+
+    Our self-contained guider (``BerniniModelWrapper``) bypasses ComfyUI's
+    ``CFGGuider`` which normally provides this reverse reference.  This shim
+    re-establishes the chain so SDE samplers see the same ``model_sampling``
+    as the rest of the pipeline.
+
+    Attributes:
+        _patcher: The ``ModelPatcher`` whose ``.model`` holds ``model_sampling``.
+    """
+    _patcher: Any
+
+    def get_model_object(self, name: str) -> Any:
+        """Delegate to the underlying model (e.g. for ``model_sampling``)."""
+        inner = getattr(self._patcher, 'model', None)
+        if inner is not None:
+            return getattr(inner, name, None)
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Enums
 # ---------------------------------------------------------------------------
 

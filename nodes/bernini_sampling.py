@@ -130,6 +130,8 @@ class BerniniModelWrapper:
         self._seed = seed
         self._model_options = model_options or {}
 
+        self._model_patcher_shim = None  # set by link_patcher()
+
         # Step counter — incremented per denoising step (not per forward).
         self._step = 0
 
@@ -193,9 +195,20 @@ class BerniniModelWrapper:
     def process_latent_out(self, latent):
         return self.inner_model.process_latent_out(latent)
 
+    def link_patcher(self, patcher):
+        """Re-establish the model_patcher reverse reference for k-diffusion.
+
+        SDE-family samplers resolve ``model_sampling`` by walking
+        ``model.inner_model.model_patcher.get_model_object(...)``.
+        Without this, ``model_patcher`` returns ``None`` and SDE samplers
+        crash with ``'NoneType' object has no attribute 'get_model_object'``.
+        """
+        from ..utils.types import ComfySamplerShim
+        self._model_patcher_shim = ComfySamplerShim(_patcher=patcher)
+
     @property
     def model_patcher(self):
-        return None
+        return self._model_patcher_shim
 
     # -- k-diffusion interface ---------------------------------------------
 
@@ -450,7 +463,7 @@ class DualExpertModelWrapper:
 
     @property
     def model_patcher(self):
-        return None
+        return self._active_wrapper().model_patcher
 
     def __call__(self, x, sigma, **extra_args):
         if self._step >= self._split and not self._switched:
@@ -873,6 +886,7 @@ def bernini_sample(
             total_steps=steps,
             injection=inj,
         )
+        wrapper.link_patcher(model)
 
         # ── Run k-diffusion ─────────────────────────────────────────
         sigmas = sigmas.to(device=device)
@@ -1073,6 +1087,7 @@ def bernini_sample_dual(
         total_steps=steps,
         injection=inj,
     )
+    high_wrapper.link_patcher(high_patcher)
 
     # ── Lazy low-noise wrapper factory ────────────────────────────────
     low_inner = None
@@ -1163,7 +1178,7 @@ def bernini_sample_dual(
         # Re-apply block swap for the low model (block count may differ).
         inj.apply_block_swap(extra_model_options, low_inner)
 
-        return BerniniModelWrapper(
+        low_wrapper = BerniniModelWrapper(
             inner_model=low_inner,
             cond_pos=low_conds.get("positive"),
             cond_neg=low_conds.get("negative"),
@@ -1185,6 +1200,8 @@ def bernini_sample_dual(
             total_steps=steps,
             injection=inj,
         )
+        low_wrapper.link_patcher(low_patcher)
+        return low_wrapper
 
     dual = DualExpertModelWrapper(high_wrapper, _make_low_wrapper, split_step)
 
@@ -1235,4 +1252,3 @@ def bernini_sample_dual(
     out.pop("downscale_ratio_temporal", None)
     out["samples"] = samples
     return out
-

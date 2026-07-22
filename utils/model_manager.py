@@ -64,7 +64,14 @@ def _make_cache_key(
     """
     _loras = sorted([(str(p), float(s)) for p, s in (lora_specs or [])])
     _compile = dict(sorted(compile_cfg.items())) if compile_cfg else {}
-    _attn = dict(sorted(attn_backend_args.items())) if attn_backend_args else {}
+    # attn_backend_args may be a BerniniAttention dataclass — not a dict.
+    _attn = {}
+    if attn_backend_args is not None:
+        import dataclasses as _dc
+        if _dc.is_dataclass(attn_backend_args) and not isinstance(attn_backend_args, dict):
+            _attn = dict(sorted(_dc.asdict(attn_backend_args).items()))
+        elif isinstance(attn_backend_args, dict):
+            _attn = dict(sorted(attn_backend_args.items()))
     raw = json.dumps(
         dict(path=model_path, loras=_loras, compile=_compile, attn=_attn,
              block_swap=block_swap),

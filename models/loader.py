@@ -31,6 +31,21 @@ from .wan_model import BerniniRWanModel
 from ..utils.log import get_logger as _get_logger
 
 logger = _get_logger("Loader")
+
+
+def _apply_model_options(patcher, model_options):
+    """Merge model_options (transformer_options etc.) into ModelPatcher.
+
+    ``_build_bernini_base`` only consumes ``dtype``/``device`` from
+    ``model_options``.  This helper transfers everything else — the
+    attention-backend override, NAG, TeaCache hooks — into the patcher
+    so the model forward pass can see them.
+    """
+    if model_options and model_options.get("transformer_options"):
+        patcher.model_options.setdefault("transformer_options", {}).update(
+            model_options["transformer_options"])
+
+
 def _build_bernini_base(
     unet_config: dict,
     model_options: dict,
@@ -640,6 +655,8 @@ def _load_bernini_model_safetensors_streaming(
     mp = comfy.model_patcher.ModelPatcher(
         base, load_device=load_device, offload_device=offload_device)
 
+    _apply_model_options(mp, model_options)
+
     # In lazy mode, block weights are NOT loaded yet — skip per-block
     # verification and only check peripheral modules.
     if lazy:
@@ -927,6 +944,8 @@ def load_bernini_model(model_path, model_options=None, state_dict=None, lora_spe
 
     mp = comfy.model_patcher.ModelPatcher(
         base, load_device=load_device, offload_device=offload_device)
+
+    _apply_model_options(mp, model_options)
 
     _verify_weights_loaded(dm)
 
