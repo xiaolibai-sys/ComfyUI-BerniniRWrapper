@@ -4,6 +4,9 @@ numpy>=1.21.0
 einops>=0.6.0
 tqdm>=4.60.0
 
+# QuantizedTensor (fp8) primitives used by SlotEntry / block-swap engine
+comfy-kitchen
+
 # Windows-only: enables lock-free, true-parallel positioned disk reads
 # (win32file.ReadFile + OVERLAPPED) used by utils/block_reader.py. The
 # platform marker is MANDATORY — pywin32 has no non-Windows wheels, so an
